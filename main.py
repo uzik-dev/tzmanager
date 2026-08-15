@@ -38,6 +38,17 @@ def can_export_reports(user_id: int) -> bool:
     return is_super_admin(user_id) or user_id in TAX_OFFICER_IDS
 
 
+# === ПОСТОЯННАЯ КЛАВИАТУРА ВНИЗУ ЭКРАНА (вместо системной клавиатуры ввода) ===
+def main_reply_kb(user_id: int) -> types.ReplyKeyboardMarkup:
+    """Кнопки внизу экрана, всегда доступны независимо от текущего меню/состояния FSM.
+    Особенно важна кнопка «❌ Отменить» — она работает даже во время ожидания фото
+    (когда обычные inline-кнопки предыдущего сообщения могут быть неудобны/потеряны)."""
+    rows = [[types.KeyboardButton(text="🏠 Главное меню"), types.KeyboardButton(text="❌ Отменить")]]
+    if can_manage_tents(user_id):
+        rows.append([types.KeyboardButton(text="🛠 Админ-панель")])
+    return types.ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
+
+
 # === 🧾 ФУНКЦИЯ ГЕНЕРАЦИИ ЭЛЕКТРОННОГО ЧЕКА ===
 def generate_receipt_text(receipt_id: str, nick: str, tent_id: int, days: int, price: int, end_date_str: str) -> str:
     return (
@@ -88,15 +99,38 @@ async def notify_admins(text: str, parse_mode: str = "HTML"):
             logging.error(f"❌ Не удалось уведомить админа {admin_id}: {e}")
 
 
-async def send_request_card_to_admins(photo_id: str, caption: str, reply_markup):
-    """Отправляет карточку заявки (с фото чека и кнопками Подтвердить/Отклонить) всем админам/модераторам.
+async def send_request_card_to_admins(photo_id: str, caption: str, reply_markup, is_document: bool = False):
+    """Отправляет карточку заявки (с чеком и кнопками Подтвердить/Отклонить) всем админам/модераторам.
     Подтверждение на одной карточке помечает заявку обработанной — остальные копии
     при попытке нажать покажут 'Эта заявка уже обработана' (это безопасно)."""
     for admin_id in get_admin_recipients():
         try:
-            await bot.send_photo(chat_id=admin_id, photo=photo_id, caption=caption, reply_markup=reply_markup)
+            if is_document:
+                await bot.send_document(chat_id=admin_id, document=photo_id, caption=caption, reply_markup=reply_markup)
+            else:
+                await bot.send_photo(chat_id=admin_id, photo=photo_id, caption=caption, reply_markup=reply_markup)
         except Exception as e:
             logging.error(f"❌ Не удалось отправить карточку заявки админу {admin_id}: {e}")
+
+
+def extract_proof_file(message: types.Message):
+    """Достаёт file_id доказательства оплаты из сообщения, независимо от того, прислано
+    оно как сжатое 'фото' или как 'файл/документ'-изображение. Возвращает (file_id, is_document)
+    либо (None, None), если в сообщении нет подходящего изображения."""
+    if message.photo:
+        return message.photo[-1].file_id, False
+    if message.document and (message.document.mime_type or "").startswith("image/"):
+        return message.document.file_id, True
+    return None, None
+
+
+async def send_proof(chat_id: int, photo_id: str, is_document: bool = False, caption: str = None):
+    """Пересылает сохранённое доказательство оплаты корректным методом в зависимости от того,
+    было оно фото или документом (иначе Telegram API вернёт ошибку неверного file_id)."""
+    if is_document:
+        await bot.send_document(chat_id=chat_id, document=photo_id, caption=caption)
+    else:
+        await bot.send_photo(chat_id=chat_id, photo=photo_id, caption=caption)
 
 
 # === БАЗА ДАННЫХ ===
@@ -164,6 +198,18 @@ def init_db():
     columns = [col[1] for col in cursor.fetchall()]
     if "photo_id" not in columns:
         cursor.execute("ALTER TABLE payments_history ADD COLUMN photo_id TEXT")
+    if "is_document" not in columns:
+        cursor.execute("ALTER TABLE payments_history ADD COLUMN is_document INTEGER DEFAULT 0")
+
+    # ВАЖНО: раньше бот принимал доказательство оплаты ТОЛЬКО как сжатое "фото" (F.photo).
+    # Если игрок отправлял скриншот как файл/документ (частый случай на ПК — "Отправить как файл",
+    # чтобы не терять качество), бот вообще никак на это не реагировал: ни игроку, ни админу
+    # ничего не приходило. Теперь принимаются оба варианта, и тип файла запоминается,
+    # чтобы потом переслать его админу корректным методом (send_photo или send_document).
+    cursor.execute("PRAGMA table_info(pending_requests)")
+    columns = [col[1] for col in cursor.fetchall()]
+    if "is_document" not in columns:
+        cursor.execute("ALTER TABLE pending_requests ADD COLUMN is_document INTEGER DEFAULT 0")
 
     cursor.execute("SELECT COUNT(*) FROM tents")
     if cursor.fetchone()[0] == 0:
@@ -280,7 +326,7 @@ def update_tent_date_db(tent_id, new_date_str):
     conn.close()
 
 
-def extend_tent_db(tent_id, days, price, photo_id, nickname):
+def extend_tent_db(tent_id, days, price, photo_id, nickname, is_document=False):
     conn = sqlite3.connect("tents.db")
     cursor = conn.cursor()
     cursor.execute("SELECT end_date FROM tents WHERE id = ?", (tent_id,))
@@ -305,8 +351,8 @@ def extend_tent_db(tent_id, days, price, photo_id, nickname):
     cursor.execute("UPDATE tents SET end_date = ? WHERE id = ?", (new_end.strftime("%Y-%m-%d"), tent_id))
 
     cursor.execute(
-        "INSERT INTO payments_history (tent_id, nickname, price, days, photo_id, pay_date) VALUES (?, ?, ?, ?, ?, ?)",
-        (tent_id, nickname, price, days, photo_id, today)
+        "INSERT INTO payments_history (tent_id, nickname, price, days, photo_id, pay_date, is_document) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (tent_id, nickname, price, days, photo_id, today, int(is_document))
     )
 
     conn.commit()
@@ -357,6 +403,12 @@ class EditStatsState(StatesGroup):
     waiting_for_oil = State()
     waiting_for_deals = State()
 
+class DeleteUserState(StatesGroup):
+    waiting_for_reason = State()
+
+class DMState(StatesGroup):
+    waiting_for_message = State()
+
 
 # === МИДДЛВАРЬ / ПРОВЕРКА НА БАН ===
 @dp.message.outer_middleware()
@@ -378,7 +430,7 @@ async def cancel_state_handler(callback: types.CallbackQuery, state: FSMContext)
     await state.clear()
     await callback.answer("❌ Действие отменено.")
     if can_manage_tents(callback.from_user.id):
-        await cmd_admin(callback.message)
+        await show_admin_panel(callback.message.chat.id, callback.from_user.id)
     else:
         conn = sqlite3.connect("tents.db")
         cursor = conn.cursor()
@@ -386,13 +438,14 @@ async def cancel_state_handler(callback: types.CallbackQuery, state: FSMContext)
         user = cursor.fetchone()
         conn.close()
         nick = user[0] if user else "Игрок"
-        await show_main_menu(callback.message, nick)
+        await show_main_menu(callback.message.chat.id, callback.from_user.id, nick)
 
 
 # === МЕНЮ ПОЛЬЗОВАТЕЛЯ ===
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext):
     await state.clear()
+    await message.answer("⌨️ Быстрые кнопки — внизу экрана.", reply_markup=main_reply_kb(message.from_user.id))
 
     if message.from_user.id == VIEWER_ID:
         await show_stats_menu(message)
@@ -408,21 +461,78 @@ async def cmd_start(message: types.Message, state: FSMContext):
         await message.answer("👋 Приветствуем в Торговой Зоне!\n\nПожалуйста, введите ваш игровой никнейм в Minecraft:")
         await state.set_state(RegisterState.waiting_for_nickname)
     else:
-        await show_main_menu(message, user[0])
+        await show_main_menu(message.chat.id, message.from_user.id, user[0])
 
 
-async def show_main_menu(message: types.Message, nickname: str):
-    tent = get_user_tent(message.from_user.id)
-    
+async def show_main_menu(chat_id: int, user_id: int, nickname: str):
+    tent = get_user_tent(user_id)
+
     kb = InlineKeyboardBuilder()
     if not tent or not tent[1]:
         kb.button(text="⛺ Арендовать палатку", callback_data="choose_free_tent")
     else:
         kb.button(text="⛺ Моя палатка", callback_data="my_tent")
-        
+
     kb.button(text="✏️ Изменить ник", callback_data="edit_nick")
     kb.adjust(1)
-    await message.answer(f"👋 С возвращением, {nickname}!\nВыберите действие:", reply_markup=kb.as_markup())
+    await bot.send_message(
+        chat_id=chat_id,
+        text=f"👋 С возвращением, {nickname}!\nВыберите действие:",
+        reply_markup=kb.as_markup()
+    )
+
+
+# === КНОПКИ ПОСТОЯННОЙ КЛАВИАТУРЫ (должны быть зарегистрированы РАНЬШЕ обработчиков
+# состояний вроде ввода ника — иначе, например, слово "Отменить" попадёт в тот
+# хендлер как обычный текст вместо того, чтобы сработать как отмена) ===
+@dp.message(F.text == "🏠 Главное меню")
+async def reply_btn_main_menu(message: types.Message, state: FSMContext):
+    await state.clear()
+    if message.from_user.id == VIEWER_ID:
+        await show_stats_menu(message)
+        return
+    conn = sqlite3.connect("tents.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT nickname FROM users WHERE tg_id = ?", (message.from_user.id,))
+    user = cursor.fetchone()
+    conn.close()
+    if not user:
+        await message.answer("Сначала зарегистрируйтесь — отправьте /start")
+        return
+    await show_main_menu(message.chat.id, message.from_user.id, user[0])
+
+
+@dp.message(F.text == "🛠 Админ-панель")
+async def reply_btn_admin(message: types.Message, state: FSMContext):
+    if not can_manage_tents(message.from_user.id):
+        return
+    await state.clear()
+    text, markup = await render_admin_panel(message.from_user.id)
+    await message.answer(text, reply_markup=markup)
+
+
+@dp.message(F.text == "❌ Отменить")
+@dp.message(Command("cancel"))
+async def reply_btn_cancel(message: types.Message, state: FSMContext):
+    """Работает в ЛЮБОМ состоянии, включая ожидание фото-чека — именно поэтому это
+    надёжный способ прервать загрузку доказательства оплаты, если прикрепили не тот файл."""
+    cur_state = await state.get_state()
+    await state.clear()
+    if cur_state is None:
+        await message.answer("Нечего отменять — вы не в процессе оформления.")
+        return
+    await message.answer("❌ Действие отменено.")
+    if can_manage_tents(message.from_user.id):
+        text, markup = await render_admin_panel(message.from_user.id)
+        await message.answer(text, reply_markup=markup)
+    else:
+        conn = sqlite3.connect("tents.db")
+        cursor = conn.cursor()
+        cursor.execute("SELECT nickname FROM users WHERE tg_id = ?", (message.from_user.id,))
+        user = cursor.fetchone()
+        conn.close()
+        nick = user[0] if user else "Игрок"
+        await show_main_menu(message.chat.id, message.from_user.id, nick)
 
 
 @dp.message(RegisterState.waiting_for_nickname)
@@ -445,7 +555,7 @@ async def process_nickname(message: types.Message, state: FSMContext):
 
     await message.answer(f"✅ Ваш никнейм {nickname} успешно зарегистрирован!")
     await state.clear()
-    await show_main_menu(message, nickname)
+    await show_main_menu(message.chat.id, message.from_user.id, nickname)
 
 
 @dp.callback_query(F.data == "edit_nick")
@@ -479,7 +589,7 @@ async def process_edit_nickname(message: types.Message, state: FSMContext):
 
     await message.answer(f"✅ Ваш никнейм обновлён на: {new_nick}")
     await state.clear()
-    await show_main_menu(message, new_nick)
+    await show_main_menu(message.chat.id, message.from_user.id, new_nick)
 
 
 # === ⛺ АРЕНДА СВОБОДНОЙ ПАЛАТКИ ИГРОКОМ ===
@@ -535,7 +645,7 @@ async def back_to_main_menu_cb(callback: types.CallbackQuery, state: FSMContext)
         await callback.message.delete()
     except Exception:
         pass
-    await show_main_menu(callback.message, nick)
+    await show_main_menu(callback.message.chat.id, callback.from_user.id, nick)
 
 
 @dp.callback_query(F.data.startswith("user_rent_tent_"), RentTentState.waiting_for_tent_choice)
@@ -583,13 +693,14 @@ async def process_user_selected_tariff(callback: types.CallbackQuery, state: FSM
 
     await callback.message.edit_text(
         f"Вы выбрали тариф: {tariff['label']}\n\n"
-        f"📸 Переведите {tariff['price']} 🛢️ нефти в игре и отправьте скриншот/фото чека прямо сюда в чат.",
+        f"📸 Переведите {tariff['price']} 🛢️ нефти в игре и отправьте скриншот/фото чека прямо сюда в чат.\n\n"
+        f"Прикрепили не то? Нажмите «❌ Отменить» внизу экрана.",
         reply_markup=kb.as_markup()
     )
     await state.set_state(RentTentState.waiting_for_photo)
 
 
-@dp.message(RentTentState.waiting_for_photo, F.photo)
+@dp.message(RentTentState.waiting_for_photo, F.photo | F.document)
 async def process_user_rent_photo(message: types.Message, state: FSMContext):
     data = await state.get_data()
     tent_id = data.get("tent_id")
@@ -600,8 +711,15 @@ async def process_user_rent_photo(message: types.Message, state: FSMContext):
         await state.clear()
         return
 
+    photo_id, is_document = extract_proof_file(message)
+    if not photo_id:
+        await message.answer(
+            "❌ Это не похоже на изображение. Пришлите скриншот/фото чека об оплате "
+            "(как фото, либо как файл-изображение), или нажмите «❌ Отменить» внизу экрана."
+        )
+        return
+
     tariff = TARIFFS[tariff_code]
-    photo_id = message.photo[-1].file_id
 
     conn = sqlite3.connect("tents.db")
     cursor = conn.cursor()
@@ -610,8 +728,8 @@ async def process_user_rent_photo(message: types.Message, state: FSMContext):
     user_nick = user_row[0] if user_row else "Неизвестно"
 
     cursor.execute(
-        "INSERT INTO pending_requests (tent_id, user_id, tariff_code, photo_id) VALUES (?, ?, ?, ?)",
-        (tent_id, message.from_user.id, tariff_code, photo_id)
+        "INSERT INTO pending_requests (tent_id, user_id, tariff_code, photo_id, is_document) VALUES (?, ?, ?, ?, ?)",
+        (tent_id, message.from_user.id, tariff_code, photo_id, int(is_document))
     )
     req_id = cursor.lastrowid
     conn.commit()
@@ -633,9 +751,17 @@ async def process_user_rent_photo(message: types.Message, state: FSMContext):
     )
 
     try:
-        await send_request_card_to_admins(photo_id, caption_text, kb.as_markup())
+        await send_request_card_to_admins(photo_id, caption_text, kb.as_markup(), is_document=is_document)
     except Exception as e:
         logging.error(f"Ошибка отправки карточки заявки админу: {e}")
+
+
+@dp.message(RentTentState.waiting_for_photo)
+async def process_user_rent_photo_fallback(message: types.Message):
+    await message.answer(
+        "📸 Ожидаю скриншот/фото чека об оплате (как фото или файл-изображение).\n"
+        "Если прикрепили не то — просто пришлите фото ещё раз, или нажмите «❌ Отменить» внизу экрана."
+    )
 
     await state.clear()
 
@@ -728,12 +854,13 @@ async def process_tariff(callback: types.CallbackQuery, state: FSMContext):
 
     await callback.message.answer(
         f"Вы выбрали: {tariff['label']}\n\n"
-        f"📸 Переведите {tariff['price']} 🛢️ нефти в игре и отправьте скриншот/фото чека прямо сюда в чат."
+        f"📸 Переведите {tariff['price']} 🛢️ нефти в игре и отправьте скриншот/фото чека прямо сюда в чат.\n\n"
+        f"Прикрепили не то? Нажмите «❌ Отменить» внизу экрана."
     )
     await state.set_state(RenewState.waiting_for_photo)
 
 
-@dp.message(RenewState.waiting_for_photo, F.photo)
+@dp.message(RenewState.waiting_for_photo, F.photo | F.document)
 async def process_photo(message: types.Message, state: FSMContext):
     data = await state.get_data()
     tent_id = data.get("tent_id")
@@ -750,14 +877,21 @@ async def process_photo(message: types.Message, state: FSMContext):
         await state.clear()
         return
 
+    photo_id, is_document = extract_proof_file(message)
+    if not photo_id:
+        await message.answer(
+            "❌ Это не похоже на изображение. Пришлите скриншот/фото чека об оплате "
+            "(как фото, либо как файл-изображение), или нажмите «❌ Отменить» внизу экрана."
+        )
+        return
+
     tariff = TARIFFS[tariff_code]
-    photo_id = message.photo[-1].file_id
 
     conn = sqlite3.connect("tents.db")
     cursor = conn.cursor()
     cursor.execute(
-        "INSERT INTO pending_requests (tent_id, user_id, tariff_code, photo_id) VALUES (?, ?, ?, ?)",
-        (tent_id, message.from_user.id, tariff_code, photo_id)
+        "INSERT INTO pending_requests (tent_id, user_id, tariff_code, photo_id, is_document) VALUES (?, ?, ?, ?, ?)",
+        (tent_id, message.from_user.id, tariff_code, photo_id, int(is_document))
     )
     req_id = cursor.lastrowid
     conn.commit()
@@ -782,11 +916,19 @@ async def process_photo(message: types.Message, state: FSMContext):
     )
 
     try:
-        await send_request_card_to_admins(photo_id, caption_text, kb.as_markup())
+        await send_request_card_to_admins(photo_id, caption_text, kb.as_markup(), is_document=is_document)
     except Exception as e:
         logging.error(f"Ошибка отправки карточки: {e}")
 
     await state.clear()
+
+
+@dp.message(RenewState.waiting_for_photo)
+async def process_photo_fallback(message: types.Message):
+    await message.answer(
+        "📸 Ожидаю скриншот/фото чека об оплате (как фото или файл-изображение).\n"
+        "Если прикрепили не то — просто пришлите фото ещё раз, или нажмите «❌ Отменить» внизу экрана."
+    )
 
 
 @dp.callback_query(F.data.startswith("appr_"))
@@ -799,7 +941,7 @@ async def approve_payment(callback: types.CallbackQuery):
 
     conn = sqlite3.connect("tents.db")
     cursor = conn.cursor()
-    cursor.execute("SELECT tent_id, user_id, tariff_code, photo_id FROM pending_requests WHERE id = ?", (req_id,))
+    cursor.execute("SELECT tent_id, user_id, tariff_code, photo_id, is_document FROM pending_requests WHERE id = ?", (req_id,))
     req = cursor.fetchone()
 
     if not req:
@@ -807,7 +949,8 @@ async def approve_payment(callback: types.CallbackQuery):
         conn.close()
         return
 
-    tent_id, user_id, tariff_code, photo_id = req
+    tent_id, user_id, tariff_code, photo_id, is_document = req
+    is_document = bool(is_document)
     tariff = TARIFFS[tariff_code]
     
     cursor.execute("SELECT nickname FROM users WHERE tg_id = ?", (user_id,))
@@ -847,8 +990,8 @@ async def approve_payment(callback: types.CallbackQuery):
         now_msk = datetime.now(MSK_TZ)
         today = now_msk.strftime("%d.%m.%Y %H:%M")
         cursor.execute(
-            "INSERT INTO payments_history (tent_id, nickname, price, days, photo_id, pay_date) VALUES (?, ?, ?, ?, ?, ?)",
-            (tent_id, user_nick, tariff["price"], tariff["days"], photo_id, today)
+            "INSERT INTO payments_history (tent_id, nickname, price, days, photo_id, pay_date, is_document) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (tent_id, user_nick, tariff["price"], tariff["days"], photo_id, today, int(is_document))
         )
         conn.commit()
         
@@ -871,7 +1014,7 @@ async def approve_payment(callback: types.CallbackQuery):
                 except Exception:
                     pass
     else:
-        new_end = extend_tent_db(tent_id, tariff["days"], tariff["price"], photo_id, user_nick)
+        new_end = extend_tent_db(tent_id, tariff["days"], tariff["price"], photo_id, user_nick, is_document=is_document)
         formatted_end_date = new_end.strftime('%d.%m.%Y')
 
     cursor.execute("DELETE FROM pending_requests WHERE id = ?", (req_id,))
@@ -1461,11 +1604,8 @@ async def cmd_stats(message: types.Message):
         await show_stats_menu(message)
 
 
-@dp.message(Command("admin"))
-async def cmd_admin(message: types.Message):
-    if not can_manage_tents(message.from_user.id):
-        return
-
+async def render_admin_panel(user_id: int):
+    """Строит текст и inline-клавиатуру админ-панели с учётом прав конкретного user_id."""
     conn = sqlite3.connect("tents.db")
     cursor = conn.cursor()
     cursor.execute("SELECT id, nickname, end_date FROM tents")
@@ -1479,7 +1619,7 @@ async def cmd_admin(message: types.Message):
         kb.button(text=btn_text, callback_data=f"adm_tent_{t_id}")
 
     kb.adjust(2)
-    if is_super_admin(message.from_user.id):
+    if is_super_admin(user_id):
         kb.row(
             types.InlineKeyboardButton(text="📢 Рассылка игрокам", callback_data="adm_broadcast"),
             types.InlineKeyboardButton(text="📊 Статистика ТЗ", callback_data="adm_stats_menu")
@@ -1491,7 +1631,24 @@ async def cmd_admin(message: types.Message):
     else:
         kb.row(types.InlineKeyboardButton(text="📊 Статистика ТЗ", callback_data="adm_stats_menu"))
 
-    await message.answer("🛠️ УПРАВЛЕНИЕ ПАЛАТКАМИ И СИСТЕМОЙ:", reply_markup=kb.as_markup())
+    return "🛠️ УПРАВЛЕНИЕ ПАЛАТКАМИ И СИСТЕМОЙ:", kb.as_markup()
+
+
+async def show_admin_panel(chat_id: int, user_id: int):
+    """Отправляет админ-панель по chat_id, права проверяются по РЕАЛЬНОМУ user_id нажавшего
+    кнопку — используйте эту функцию вместо cmd_admin(callback.message) внутри callback-хендлеров."""
+    if not can_manage_tents(user_id):
+        return
+    text, markup = await render_admin_panel(user_id)
+    await bot.send_message(chat_id=chat_id, text=text, reply_markup=markup)
+
+
+@dp.message(Command("admin"))
+async def cmd_admin(message: types.Message):
+    if not can_manage_tents(message.from_user.id):
+        return
+    text, markup = await render_admin_panel(message.from_user.id)
+    await message.answer(text, reply_markup=markup)
 
 
 # --- ЧЁРНЫЙ СПИСОК ---
@@ -1692,7 +1849,7 @@ async def show_history_photos(callback: types.CallbackQuery):
     cursor = conn.cursor()
 
     cursor.execute(
-        "SELECT nickname, price, days, photo_id, pay_date FROM payments_history WHERE tent_id = ? ORDER BY id DESC",
+        "SELECT nickname, price, days, photo_id, pay_date, is_document FROM payments_history WHERE tent_id = ? ORDER BY id DESC",
         (tent_id,)
     )
     rows = cursor.fetchall()
@@ -1720,7 +1877,7 @@ async def show_history_photos(callback: types.CallbackQuery):
 
     await callback.answer("📤 Отправка чеков...")
 
-    for nick, price, days, photo_id, pay_date in filtered_rows:
+    for nick, price, days, photo_id, pay_date, is_document in filtered_rows:
         caption = (
             f"🧾 Оплата Палатки №{tent_id}\n"
             f"👤 Игрок: {nick}\n"
@@ -1729,12 +1886,12 @@ async def show_history_photos(callback: types.CallbackQuery):
         )
         try:
             if photo_id:
-                await bot.send_photo(chat_id=callback.from_user.id, photo=photo_id, caption=caption)
+                await send_proof(callback.from_user.id, photo_id, is_document=bool(is_document), caption=caption)
             else:
                 await bot.send_message(chat_id=callback.from_user.id, text=f"{caption}\n(Фото отсутствует)")
             await asyncio.sleep(0.3)
         except Exception as e:
-            print(f"Ошибка вывода чека: {e}")
+            logging.error(f"Ошибка вывода чека: {e}")
 
 
 @dp.callback_query(F.data.startswith("adm_tent_"))
@@ -1776,6 +1933,7 @@ async def adm_tent_manage(callback: types.CallbackQuery):
 
         kb.button(text="✏️ Изменить дату аренды", callback_data=f"edit_date_{tent_id}")
         kb.button(text="📜 История платежей (Чеки)", callback_data=f"history_menu_{tent_id}")
+        kb.button(text="✉️ Написать игроку", callback_data=f"dm_user_{tg_id}")
         kb.button(text="❌ Завершить аренду (Освободить)", callback_data=f"clear_{tent_id}_{tg_id}")
 
     kb.button(text="🔙 Назад в меню", callback_data="back_admin")
@@ -1817,7 +1975,7 @@ async def process_give(callback: types.CallbackQuery):
 
     await send_log(f"⛺ <b>Выдана палатка:</b>\nПалатка №{tent_id} выдана игроку <code>{nickname}</code> (ID: <code>{user_id}</code>)")
     await callback.answer(f"Палатка №{tent_id} выдана {nickname}!")
-    await cmd_admin(callback.message)
+    await show_admin_panel(callback.message.chat.id, callback.from_user.id)
 
 
 @dp.callback_query(F.data.startswith("clear_"))
@@ -1840,7 +1998,7 @@ async def process_clear(callback: types.CallbackQuery):
 
     await send_log(f"🧹 <b>Освобождена палатка:</b>\nАдминистратор освободил палатку №{tent_id} (была у <code>{tent[2]}</code>)")
     await callback.answer(f"Палатка №{tent_id} освобождена!")
-    await cmd_admin(callback.message)
+    await show_admin_panel(callback.message.chat.id, callback.from_user.id)
 
 
 @dp.callback_query(F.data == "adm_users_list")
@@ -1862,6 +2020,7 @@ async def adm_users_list(callback: types.CallbackQuery):
 
     for u_id, u_name, nick in users:
         msg += f"• <b>{nick}</b> (@{u_name})\n"
+        kb.button(text=f"✉️ {nick}", callback_data=f"dm_user_{u_id}")
         kb.button(text=f"🚫 Забанить {nick}", callback_data=f"ban_user_{u_id}")
         kb.button(text=f"🗑️ Удалить {nick}", callback_data=f"del_user_{u_id}")
 
@@ -1872,17 +2031,87 @@ async def adm_users_list(callback: types.CallbackQuery):
     await callback.message.edit_text(msg, reply_markup=kb.as_markup(), parse_mode="HTML")
 
 
+# === УДАЛЕНИЕ ИГРОКА С УКАЗАНИЕМ ПРИЧИНЫ ===
 @dp.callback_query(F.data.startswith("del_user_"))
-async def process_del_user(callback: types.CallbackQuery):
+async def process_del_user_start(callback: types.CallbackQuery, state: FSMContext):
     if not is_super_admin(callback.from_user.id):
         return
 
     user_id = int(callback.data.split("_")[2])
-    delete_user_db(user_id)
+    conn = sqlite3.connect("tents.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT nickname FROM users WHERE tg_id = ?", (user_id,))
+    row = cursor.fetchone()
+    conn.close()
+    nick = row[0] if row else "Игрок"
 
-    await send_log(f"🗑️ <b>Удаление аккаунта:</b> Пользователь ID <code>{user_id}</code> был удалён из базы.")
-    await callback.answer("❌ Игрок удалён из базы!")
-    await adm_users_list(callback)
+    await state.update_data(del_user_id=user_id, del_user_nick=nick)
+    await state.set_state(DeleteUserState.waiting_for_reason)
+
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🗑️ Удалить без указания причины", callback_data="del_user_no_reason")
+    kb.button(text="❌ Отменить", callback_data="cancel_state")
+    kb.adjust(1)
+
+    await callback.message.answer(
+        f"✏️ Укажите причину удаления игрока <b>{nick}</b> следующим сообщением — "
+        f"она будет автоматически отправлена ему в личные сообщения.\n\n"
+        f"Либо удалите без объяснения причины:",
+        reply_markup=kb.as_markup(),
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+
+async def finalize_delete_user(chat_id: int, user_id: int, nick: str, reason: str | None):
+    delete_user_db(user_id)
+    reason_txt = reason.strip() if reason and reason.strip() else "не указана"
+
+    try:
+        await bot.send_message(
+            chat_id=user_id,
+            text=(
+                "🚫 <b>Вы были удалены из базы игроков Торговой Зоны.</b>\n\n"
+                f"Причина: {reason_txt}\n\n"
+                "Если считаете это ошибкой — свяжитесь с администрацией."
+            ),
+            parse_mode="HTML"
+        )
+        delivered = True
+    except Exception as e:
+        logging.error(f"❌ Не удалось уведомить удалённого игрока {user_id}: {e}")
+        delivered = False
+
+    await send_log(f"🗑️ <b>Удаление аккаунта:</b> {nick} (ID: <code>{user_id}</code>)\nПричина: {reason_txt}")
+    note = "" if delivered else "\n⚠️ Не удалось доставить уведомление игроку (возможно, он заблокировал бота)."
+    await bot.send_message(chat_id=chat_id, text=f"❌ Игрок {nick} удалён из базы.\nПричина: {reason_txt}{note}")
+
+
+@dp.callback_query(F.data == "del_user_no_reason")
+async def process_del_user_no_reason(callback: types.CallbackQuery, state: FSMContext):
+    if not is_super_admin(callback.from_user.id):
+        return
+    data = await state.get_data()
+    await state.clear()
+    user_id = data.get("del_user_id")
+    nick = data.get("del_user_nick", "Игрок")
+    if not user_id:
+        await callback.answer("⚠️ Сессия удаления устарела, начните заново.", show_alert=True)
+        return
+    await callback.answer()
+    await finalize_delete_user(callback.message.chat.id, user_id, nick, None)
+
+
+@dp.message(DeleteUserState.waiting_for_reason)
+async def process_del_user_reason(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    user_id = data.get("del_user_id")
+    nick = data.get("del_user_nick", "Игрок")
+    await state.clear()
+    if not user_id:
+        await message.answer("⚠️ Сессия удаления устарела, начните заново через список игроков.")
+        return
+    await finalize_delete_user(message.chat.id, user_id, nick, message.text)
 
 
 @dp.callback_query(F.data == "back_admin")
@@ -1890,7 +2119,7 @@ async def back_admin(callback: types.CallbackQuery, state: FSMContext):
     if not can_manage_tents(callback.from_user.id):
         return
     await state.clear()
-    await cmd_admin(callback.message)
+    await show_admin_panel(callback.message.chat.id, callback.from_user.id)
 
 
 # === 🚀 ЗАПУСК БОТА И ПЛАНИРОВЩИКА ===
@@ -1908,4 +2137,4 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    asyncio.run(main())
