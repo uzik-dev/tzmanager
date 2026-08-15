@@ -70,6 +70,35 @@ async def send_log(text: str):
             logging.error(f"❌ Ошибка отправки в LOG-канал ({LOG_CHANNEL_ID}): {e}")
 
 
+# === УВЕДОМЛЕНИЯ АДМИНИСТРАЦИИ ===
+# ВАЖНО: раньше уведомления слались только на ADMIN_ID, который в config.py был
+# незаполненным плейсхолдером ("1" — несуществующий Telegram ID), поэтому реальный
+# админ (SUPER_ADMIN_ID) никогда их не получал. Теперь уведомления уходят сразу
+# всем реальным получателям: SUPER_ADMIN_ID, ADMIN_ID (если задан отдельно) и всем MODERATOR_IDS.
+def get_admin_recipients() -> list:
+    ids = {SUPER_ADMIN_ID, ADMIN_ID, *MODERATOR_IDS}
+    return [i for i in ids if i]
+
+
+async def notify_admins(text: str, parse_mode: str = "HTML"):
+    for admin_id in get_admin_recipients():
+        try:
+            await bot.send_message(chat_id=admin_id, text=text, parse_mode=parse_mode)
+        except Exception as e:
+            logging.error(f"❌ Не удалось уведомить админа {admin_id}: {e}")
+
+
+async def send_request_card_to_admins(photo_id: str, caption: str, reply_markup):
+    """Отправляет карточку заявки (с фото чека и кнопками Подтвердить/Отклонить) всем админам/модераторам.
+    Подтверждение на одной карточке помечает заявку обработанной — остальные копии
+    при попытке нажать покажут 'Эта заявка уже обработана' (это безопасно)."""
+    for admin_id in get_admin_recipients():
+        try:
+            await bot.send_photo(chat_id=admin_id, photo=photo_id, caption=caption, reply_markup=reply_markup)
+        except Exception as e:
+            logging.error(f"❌ Не удалось отправить карточку заявки админу {admin_id}: {e}")
+
+
 # === БАЗА ДАННЫХ ===
 def init_db():
     conn = sqlite3.connect("tents.db")
@@ -412,13 +441,7 @@ async def process_nickname(message: types.Message, state: FSMContext):
     save_user(message.from_user.id, username, nickname)
     await send_log(f"🆕 <b>Новая регистрация:</b>\nНик: <code>{nickname}</code>\nTG: @{username} (ID: <code>{message.from_user.id}</code>)")
 
-    try:
-        await bot.send_message(
-            chat_id=ADMIN_ID,
-            text=f"🆕 Новый игрок зарегистрировался!\n\n👤 Ник: {nickname}\n📱 Telegram: @{username} (ID: {message.from_user.id})"
-        )
-    except Exception:
-        pass
+    await notify_admins(f"🆕 Новый игрок зарегистрировался!\n\n👤 Ник: {nickname}\n📱 Telegram: @{username} (ID: {message.from_user.id})")
 
     await message.answer(f"✅ Ваш никнейм {nickname} успешно зарегистрирован!")
     await state.clear()
@@ -469,7 +492,14 @@ async def show_free_tents_for_user(callback: types.CallbackQuery, state: FSMCont
 
     conn = sqlite3.connect("tents.db")
     cursor = conn.cursor()
-    cursor.execute("SELECT id FROM tents WHERE tg_id IS NULL ORDER BY id ASC")
+    # ВАЖНО: исключаем палатки, на которые уже подана заявка и ждёт подтверждения админом —
+    # иначе палатка показывается "свободной" даже когда её уже кто-то занимает (гонка заявок).
+    cursor.execute("""
+        SELECT id FROM tents
+        WHERE tg_id IS NULL
+        AND id NOT IN (SELECT tent_id FROM pending_requests)
+        ORDER BY id ASC
+    """)
     free_tents = cursor.fetchall()
     conn.close()
 
@@ -515,6 +545,15 @@ async def process_user_selected_tent(callback: types.CallbackQuery, state: FSMCo
     tent = get_tent(tent_id)
     if not tent or tent[1] is not None:
         await callback.answer("❌ Извините, эту палатку только что заняли. Выберите другую.", show_alert=True)
+        return
+
+    conn = sqlite3.connect("tents.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT 1 FROM pending_requests WHERE tent_id = ?", (tent_id,))
+    already_pending = cursor.fetchone()
+    conn.close()
+    if already_pending:
+        await callback.answer("❌ На эту палатку уже подана заявка и она ожидает подтверждения. Выберите другую.", show_alert=True)
         return
 
     await state.update_data(tent_id=tent_id)
@@ -594,12 +633,7 @@ async def process_user_rent_photo(message: types.Message, state: FSMContext):
     )
 
     try:
-        await bot.send_photo(
-            chat_id=ADMIN_ID,
-            photo=photo_id,
-            caption=caption_text,
-            reply_markup=kb.as_markup()
-        )
+        await send_request_card_to_admins(photo_id, caption_text, kb.as_markup())
     except Exception as e:
         logging.error(f"Ошибка отправки карточки заявки админу: {e}")
 
@@ -658,19 +692,23 @@ async def user_quit_tent(callback: types.CallbackQuery):
         f"⚠️ Пожалуйста, уберите весь ваш товар с палатки в течение 2 дней!"
     )
 
-    try:
-        await bot.send_message(
-            chat_id=ADMIN_ID,
-            text=f"ℹ️ Игрок {callback.from_user.full_name} ({tent[2]}) самостоятельно отказался от палатки №{tent_id}."
-        )
-    except Exception:
-        pass
+    await notify_admins(f"ℹ️ Игрок {callback.from_user.full_name} ({tent[2]}) самостоятельно отказался от палатки №{tent_id}.")
 
 
 # === ПРОЦЕСС ПРОДЛЕНИЯ И ЧЕК ===
 @dp.callback_query(F.data.startswith("renew_"))
 async def select_tariff(callback: types.CallbackQuery, state: FSMContext):
     tent_id = int(callback.data.split("_")[1])
+
+    # ВАЖНО: раньше тут не проверялось, что палатка вообще принадлежит нажавшему кнопку —
+    # любой пользователь мог отправить callback "renew_<номер>" (например, переслав кнопку
+    # от другого игрока или просто угадав номер палатки 1-20) и попасть в процесс продления
+    # чужой или вообще любой палатки. Теперь продлевать можно только СВОЮ палатку.
+    owned_tent = get_user_tent(callback.from_user.id)
+    if not owned_tent or owned_tent[1] is None or owned_tent[0] != tent_id:
+        await callback.answer("❌ Это не ваша палатка! Продлевать можно только свою палатку.", show_alert=True)
+        return
+
     await state.update_data(tent_id=tent_id)
 
     kb = InlineKeyboardBuilder()
@@ -706,6 +744,12 @@ async def process_photo(message: types.Message, state: FSMContext):
         await state.clear()
         return
 
+    owned_tent = get_user_tent(message.from_user.id)
+    if not owned_tent or owned_tent[1] is None or owned_tent[0] != tent_id:
+        await message.answer("❌ Это не ваша палатка! Продление отменено.")
+        await state.clear()
+        return
+
     tariff = TARIFFS[tariff_code]
     photo_id = message.photo[-1].file_id
 
@@ -738,12 +782,7 @@ async def process_photo(message: types.Message, state: FSMContext):
     )
 
     try:
-        await bot.send_photo(
-            chat_id=ADMIN_ID,
-            photo=photo_id,
-            caption=caption_text,
-            reply_markup=kb.as_markup()
-        )
+        await send_request_card_to_admins(photo_id, caption_text, kb.as_markup())
     except Exception as e:
         logging.error(f"Ошибка отправки карточки: {e}")
 
@@ -778,6 +817,30 @@ async def approve_payment(callback: types.CallbackQuery):
     tent_data = get_tent(tent_id)
     is_currently_empty = (tent_data[1] is None)
 
+    # Защита от гонки заявок: пока эта заявка ждала подтверждения, палатку мог уже занять
+    # кто-то другой (одобрили другую заявку раньше). Раньше в этом случае код по ошибке
+    # "продлевал" палатку под именем нового заявителя, хотя фактическим арендатором
+    # оставался первый игрок — деньги/дни путались между разными людьми.
+    if not is_currently_empty and tent_data[1] != user_id:
+        cursor.execute("DELETE FROM pending_requests WHERE id = ?", (req_id,))
+        conn.commit()
+        conn.close()
+        try:
+            await bot.send_message(
+                chat_id=user_id,
+                text=f"❌ Палатку №{tent_id} уже успел занять другой игрок, пока ваша заявка ожидала подтверждения. Пожалуйста, выберите другую палатку через /start."
+            )
+        except Exception:
+            pass
+        await callback.answer("⚠️ Эта палатка уже занята другим игроком — заявка отклонена автоматически.", show_alert=True)
+        try:
+            await callback.message.edit_caption(
+                caption=callback.message.caption + "\n\n⚠️ АВТООТКЛОНЕНО (палатку уже занял другой игрок)"
+            )
+        except Exception:
+            pass
+        return
+
     if is_currently_empty:
         assign_tent_db(tent_id, user_id, user_nick, days=tariff["days"])
         
@@ -791,6 +854,22 @@ async def approve_payment(callback: types.CallbackQuery):
         
         updated_tent = get_tent(tent_id)
         formatted_end_date = datetime.strptime(updated_tent[3], "%Y-%m-%d").strftime('%d.%m.%Y')
+
+        # Палатка только что занята — все ОСТАЛЬНЫЕ ожидающие заявки на неё (от других игроков)
+        # больше не актуальны, отменяем их и уведомляем тех игроков, чтобы они не ждали зря.
+        cursor.execute("SELECT id, user_id FROM pending_requests WHERE tent_id = ? AND id != ?", (tent_id, req_id))
+        stale_requests = cursor.fetchall()
+        cursor.execute("DELETE FROM pending_requests WHERE tent_id = ? AND id != ?", (tent_id, req_id))
+        conn.commit()
+        for stale_id, stale_user_id in stale_requests:
+            if stale_user_id != user_id:
+                try:
+                    await bot.send_message(
+                        chat_id=stale_user_id,
+                        text=f"❌ Палатку №{tent_id} уже занял другой игрок. Ваша заявка отменена автоматически — выберите другую палатку через /start."
+                    )
+                except Exception:
+                    pass
     else:
         new_end = extend_tent_db(tent_id, tariff["days"], tariff["price"], photo_id, user_nick)
         formatted_end_date = new_end.strftime('%d.%m.%Y')
@@ -1713,6 +1792,29 @@ async def process_give(callback: types.CallbackQuery):
     _, tent_id, user_id, nickname = callback.data.split("_")
     assign_tent_db(int(tent_id), int(user_id), nickname)
 
+    tent = get_tent(int(tent_id))
+    end_date_str = tent[3] if tent else None
+    try:
+        formatted_end = datetime.strptime(end_date_str, "%Y-%m-%d").strftime("%d.%m.%Y")
+    except Exception:
+        formatted_end = end_date_str or "не установлена"
+
+    # Уведомляем самого игрока о том, что ему выдали палатку — раньше он узнавал об этом
+    # только зайдя в бота случайно, никакого сообщения не приходило.
+    try:
+        await bot.send_message(
+            chat_id=int(user_id),
+            text=(
+                f"🎉 <b>Вам выдана палатка!</b>\n\n"
+                f"⛺ Палатка №{tent_id}\n"
+                f"📅 Оплачена до: {formatted_end} 23:59:59\n\n"
+                f"Откройте /start → «⛺ Моя палатка», чтобы посмотреть детали или продлить аренду."
+            ),
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        logging.error(f"❌ Не удалось уведомить игрока {user_id} о выдаче палатки: {e}")
+
     await send_log(f"⛺ <b>Выдана палатка:</b>\nПалатка №{tent_id} выдана игроку <code>{nickname}</code> (ID: <code>{user_id}</code>)")
     await callback.answer(f"Палатка №{tent_id} выдана {nickname}!")
     await cmd_admin(callback.message)
@@ -1726,6 +1828,15 @@ async def process_clear(callback: types.CallbackQuery):
     _, tent_id, user_id = callback.data.split("_")
     tent = get_tent(int(tent_id))
     clear_tent_db(int(tent_id))
+
+    if tent and tent[1]:
+        try:
+            await bot.send_message(
+                chat_id=int(user_id),
+                text=f"📦 Администратор завершил вашу аренду Палатки №{tent_id}.\n\n⚠️ Пожалуйста, уберите весь ваш товар с палатки в течение 2 дней!"
+            )
+        except Exception as e:
+            logging.error(f"❌ Не удалось уведомить игрока {user_id} об освобождении палатки: {e}")
 
     await send_log(f"🧹 <b>Освобождена палатка:</b>\nАдминистратор освободил палатку №{tent_id} (была у <code>{tent[2]}</code>)")
     await callback.answer(f"Палатка №{tent_id} освобождена!")
@@ -1797,4 +1908,4 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    asyncio.run(main())
