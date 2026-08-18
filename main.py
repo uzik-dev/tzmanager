@@ -16,9 +16,12 @@ from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from config import (
-    ADMIN_ID, BOT_TOKEN, LOG_CHANNEL_ID, TARIFFS, VIEWER_ID, 
-    MODERATOR_IDS, SUPER_ADMIN_ID, TAX_OFFICER_IDS
+    ADMIN_ID, BOT_TOKEN, LOG_CHANNEL_ID, TARIFFS, VIEWER_ID,
+    MODERATOR_IDS, SUPER_ADMIN_ID, TAX_OFFICER_IDS, TAX_RATE,
+    GOOGLE_SHEETS_SPREADSHEET_ID, GOOGLE_SERVICE_ACCOUNT_FILE, GOOGLE_SHEETS_TENTS_WORKSHEET
 )
+import sheets_sync
+import firestore_sync
 
 logging.basicConfig(level=logging.WARNING)
 bot = Bot(token=BOT_TOKEN)
@@ -26,6 +29,54 @@ dp = Dispatcher(storage=MemoryStorage())
 
 # Часовой пояс МСК (UTC+3)
 MSK_TZ = timezone(timedelta(hours=3))
+
+
+# === СИСТЕМА ЛОГИРОВАНИЯ ОШИБОК В TELEGRAM-КАНАЛ ===
+# Стандартный logging.Handler: любой logging.error(...)/logging.exception(...) в любом
+# месте кода теперь автоматически долетает в LOG_CHANNEL_ID, без ручных await send_log(...).
+# Работает асинхронно через очередь, чтобы не блокировать event loop синхронным вызовом.
+class TelegramErrorHandler(logging.Handler):
+    def __init__(self, level=logging.ERROR):
+        super().__init__(level)
+        self._queue: "asyncio.Queue[str] | None" = None
+        self._worker_started = False
+
+    def _ensure_worker(self):
+        if self._worker_started:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        self._queue = asyncio.Queue()
+        loop.create_task(self._worker())
+        self._worker_started = True
+
+    async def _worker(self):
+        while True:
+            text = await self._queue.get()
+            try:
+                await bot.send_message(chat_id=LOG_CHANNEL_ID, text=text, parse_mode="HTML")
+            except Exception:
+                pass  # Не даём ошибке логирования породить бесконечный цикл логирования ошибок
+
+    def emit(self, record: logging.LogRecord):
+        if not LOG_CHANNEL_ID:
+            return
+        try:
+            self._ensure_worker()
+            if self._queue is None:
+                return
+            msg = self.format(record)
+            text = f"🐞 <b>[ERROR | {record.levelname}]</b>\n<code>{msg[:3500]}</code>"
+            self._queue.put_nowait(text)
+        except Exception:
+            pass
+
+
+_tg_handler = TelegramErrorHandler(level=logging.ERROR)
+_tg_handler.setFormatter(logging.Formatter("%(asctime)s | %(name)s | %(message)s", datefmt="%d.%m.%Y %H:%M:%S"))
+logging.getLogger().addHandler(_tg_handler)
 
 # === РОЛЕВАЯ СИСТЕМА И ПРОВЕРКА ПРАВ ===
 def is_super_admin(user_id: int) -> bool:
@@ -40,10 +91,10 @@ def can_export_reports(user_id: int) -> bool:
 
 # === ПОСТОЯННАЯ КЛАВИАТУРА ВНИЗУ ЭКРАНА (вместо системной клавиатуры ввода) ===
 def main_reply_kb(user_id: int) -> types.ReplyKeyboardMarkup:
-    """Кнопки внизу экрана, всегда доступны независимо от текущего меню/состояния FSM.
-    Особенно важна кнопка «❌ Отменить» — она работает даже во время ожидания фото
-    (когда обычные inline-кнопки предыдущего сообщения могут быть неудобны/потеряны)."""
-    rows = [[types.KeyboardButton(text="🏠 Главное меню"), types.KeyboardButton(text="❌ Отменить")]]
+    """Кнопки внизу экрана, всегда доступны независимо от текущего меню.
+    ВАЖНО: кнопки «Отмена» тут нет намеренно — по актуальному ТЗ отмена доступна
+    только на этапе подтверждения загруженного скрина оплаты (inline-кнопка там же)."""
+    rows = [[types.KeyboardButton(text="🏠 Главное меню")]]
     if can_manage_tents(user_id):
         rows.append([types.KeyboardButton(text="🛠 Админ-панель")])
     return types.ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
@@ -133,10 +184,36 @@ async def send_proof(chat_id: int, photo_id: str, is_document: bool = False, cap
         await bot.send_photo(chat_id=chat_id, photo=photo_id, caption=caption)
 
 
+async def safe_send(user_id: int, text: str, parse_mode: str = "HTML", reply_markup=None) -> bool:
+    """Единая точка отправки личных сообщений игрокам напрямую по user_id.
+    Возвращает True/False вместо того, чтобы падать — раньше в разных местах кода
+    отправка была разбросана по отдельным try/except с разным поведением, из-за чего
+    часть сбоев (заблокировал бота, удалил аккаунт, неверный ID) либо не логировалась,
+    либо вообще не обрабатывалась. Здесь же можно централизованно расширить проверку —
+    например, сверяться со списком известных tg_id в таблице users."""
+    if not user_id:
+        logging.error("safe_send: вызван без user_id")
+        return False
+    try:
+        await bot.send_message(chat_id=user_id, text=text, parse_mode=parse_mode, reply_markup=reply_markup)
+        return True
+    except Exception as e:
+        logging.error(f"❌ Не удалось отправить сообщение игроку {user_id}: {e}")
+        return False
+
+
 # === БАЗА ДАННЫХ ===
 def init_db():
     conn = sqlite3.connect("tents.db")
     cursor = conn.cursor()
+
+    # ВАЖНО (надёжность БД): включаем WAL-режим — это резко снижает риск повреждения
+    # базы при параллельной записи/чтении и при аварийном завершении процесса.
+    # Полноценный переезд на PostgreSQL — отдельная инфраструктурная задача, для которой
+    # нужны хостинг/строка подключения; см. пояснение в конце. Здесь усиливаем то, что есть.
+    cursor.execute("PRAGMA journal_mode=WAL")
+    cursor.execute("PRAGMA synchronous=NORMAL")
+    cursor.execute("PRAGMA foreign_keys=ON")
 
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS users (
@@ -194,6 +271,17 @@ def init_db():
     """)
     cursor.execute("INSERT OR IGNORE INTO stats_corrections (id, oil_offset, deals_offset) VALUES (1, 0, 0)")
 
+    # Дедупликация авто-напоминаний за 24ч/6ч до конца аренды — чтобы одно и то же
+    # напоминание не улетало игроку повторно на каждом часовом прогоне планировщика.
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS sent_reminders (
+            tent_id INTEGER,
+            milestone TEXT,
+            end_date TEXT,
+            PRIMARY KEY (tent_id, milestone, end_date)
+        )
+    """)
+
     cursor.execute("PRAGMA table_info(payments_history)")
     columns = [col[1] for col in cursor.fetchall()]
     if "photo_id" not in columns:
@@ -210,6 +298,11 @@ def init_db():
     columns = [col[1] for col in cursor.fetchall()]
     if "is_document" not in columns:
         cursor.execute("ALTER TABLE pending_requests ADD COLUMN is_document INTEGER DEFAULT 0")
+
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_tents_tg_id ON tents(tg_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_payments_tent_id ON payments_history(tent_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_pending_tent_id ON pending_requests(tent_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_pending_user_id ON pending_requests(user_id)")
 
     cursor.execute("SELECT COUNT(*) FROM tents")
     if cursor.fetchone()[0] == 0:
@@ -265,13 +358,17 @@ def save_user(tg_id, username, nickname):
     conn.close()
 
 
-def delete_user_db(tg_id):
+async def delete_user_db(tg_id):
     conn = sqlite3.connect("tents.db")
     cursor = conn.cursor()
     cursor.execute("DELETE FROM users WHERE tg_id = ?", (tg_id,))
-    cursor.execute("UPDATE tents SET tg_id = NULL, nickname = NULL, end_date = NULL WHERE tg_id = ?", (tg_id,))
     conn.commit()
     conn.close()
+
+    owned = await firestore_sync.get_user_tent(tg_id)
+    if owned:
+        await firestore_sync.clear_tent(owned[0])
+        await sync_tent_row(owned[0])
 
 
 def get_all_users():
@@ -283,80 +380,112 @@ def get_all_users():
     return rows
 
 
-def get_user_tent(tg_id):
+async def get_user_tent(tg_id):
+    """Теперь читает из Firestore (единый источник данных с веб-приложением и
+    Google-таблицей) вместо локальной SQLite."""
+    return await firestore_sync.get_user_tent(tg_id)
+
+
+async def get_tent(tent_id):
+    return await firestore_sync.get_tent(tent_id)
+
+
+async def get_all_tents_list():
+    """Список всех 20 палаток (id, tg_id, nickname, end_date) — замена массовых
+    'SELECT ... FROM tents' запросов, которые раньше шли напрямую в SQLite."""
+    return await firestore_sync.get_all_tents()
+
+
+def _mirror_payment_to_sqlite(tent_id, nickname, price, days, photo_id, is_document):
+    """Локальное зеркало платежа в SQLite payments_history — нужно только для того,
+    чтобы существующая генерация Excel-отчётов продолжала работать без переписывания.
+    Канонической историей платежей теперь считается payments[] в документе Firestore."""
     conn = sqlite3.connect("tents.db")
     cursor = conn.cursor()
-    cursor.execute("SELECT id, tg_id, nickname, end_date FROM tents WHERE tg_id = ?", (tg_id,))
-    row = cursor.fetchone()
-    conn.close()
-    return row
-
-
-def get_tent(tent_id):
-    conn = sqlite3.connect("tents.db")
-    cursor = conn.cursor()
-    cursor.execute("SELECT id, tg_id, nickname, end_date FROM tents WHERE id = ?", (tent_id,))
-    row = cursor.fetchone()
-    conn.close()
-    return row
-
-
-def assign_tent_db(tent_id, tg_id, nickname, days=7):
-    conn = sqlite3.connect("tents.db")
-    cursor = conn.cursor()
-    end_date = (datetime.now(MSK_TZ) + timedelta(days=days)).strftime("%Y-%m-%d")
-    cursor.execute("UPDATE tents SET tg_id = ?, nickname = ?, end_date = ? WHERE id = ?", (tg_id, nickname, end_date, tent_id))
-    conn.commit()
-    conn.close()
-
-
-def clear_tent_db(tent_id):
-    conn = sqlite3.connect("tents.db")
-    cursor = conn.cursor()
-    cursor.execute("UPDATE tents SET tg_id = NULL, nickname = NULL, end_date = NULL WHERE id = ?", (tent_id,))
-    conn.commit()
-    conn.close()
-
-
-def update_tent_date_db(tent_id, new_date_str):
-    conn = sqlite3.connect("tents.db")
-    cursor = conn.cursor()
-    cursor.execute("UPDATE tents SET end_date = ? WHERE id = ?", (new_date_str, tent_id))
-    conn.commit()
-    conn.close()
-
-
-def extend_tent_db(tent_id, days, price, photo_id, nickname, is_document=False):
-    conn = sqlite3.connect("tents.db")
-    cursor = conn.cursor()
-    cursor.execute("SELECT end_date FROM tents WHERE id = ?", (tent_id,))
-    row = cursor.fetchone()
-    end_date_str = row[0] if row else None
-
-    now_msk = datetime.now(MSK_TZ)
-
-    if end_date_str:
-        try:
-            curr_end = datetime.strptime(end_date_str, "%Y-%m-%d").replace(tzinfo=MSK_TZ)
-            if curr_end < now_msk:
-                new_end = now_msk + timedelta(days=days)
-            else:
-                new_end = curr_end + timedelta(days=days)
-        except Exception:
-            new_end = now_msk + timedelta(days=days)
-    else:
-        new_end = now_msk + timedelta(days=days)
-
-    today = now_msk.strftime("%d.%m.%Y %H:%M")
-    cursor.execute("UPDATE tents SET end_date = ? WHERE id = ?", (new_end.strftime("%Y-%m-%d"), tent_id))
-
+    today = datetime.now(MSK_TZ).strftime("%d.%m.%Y %H:%M")
     cursor.execute(
         "INSERT INTO payments_history (tent_id, nickname, price, days, photo_id, pay_date, is_document) VALUES (?, ?, ?, ?, ?, ?, ?)",
         (tent_id, nickname, price, days, photo_id, today, int(is_document))
     )
-
     conn.commit()
     conn.close()
+
+
+async def assign_tent_db(tent_id, tg_id, nickname, days=7, price=0, photo_id=None, is_document=False):
+    end_date = await firestore_sync.assign_tent(tent_id, tg_id, nickname, days=days, price=price)
+    if price:
+        await asyncio.to_thread(_mirror_payment_to_sqlite, tent_id, nickname, price, days, photo_id, is_document)
+    return end_date
+
+
+async def clear_tent_db(tent_id):
+    await firestore_sync.clear_tent(tent_id)
+
+
+async def update_tent_date_db(tent_id, new_date_str):
+    await firestore_sync.update_tent_date(tent_id, new_date_str)
+
+
+def tent_status_label(end_date_str) -> str:
+    """Единая формулировка статуса палатки по дате окончания — используется и в
+    сообщении игроку 'Моя палатка', и при синхронизации в Google Sheets."""
+    if not end_date_str:
+        return "⚪ Свободна"
+    now_msk = datetime.now(MSK_TZ).replace(tzinfo=None)
+    try:
+        end_date = datetime.strptime(end_date_str, "%Y-%m-%d")
+        days_left = (end_date - now_msk).days + 1
+    except Exception:
+        return "⚪ Свободна"
+    if days_left < 0:
+        return f"🔴 ПРОСРОЧЕНА на {abs(days_left)} дн."
+    if days_left <= 2:
+        return f"🟡 Заканчивается (осталось {days_left} дн.)"
+    return f"🟢 Активна (осталось {days_left} дн.)"
+
+
+async def sync_tent_row(tent_id: int):
+    """Подтягивает текущее состояние палатки (из Firestore) и её платежей и
+    отправляет строку в Google-таблицу реестра. Вызывается после КАЖДОГО изменения
+    палатки — не блокирует и не ломает основной функционал бота при сбое."""
+    if not sheets_sync.is_configured():
+        return
+    tent = await get_tent(tent_id)
+    if not tent:
+        return
+    _, tg_id, nickname, end_date = tent
+
+    conn = sqlite3.connect("tents.db")
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT price FROM payments_history WHERE tent_id = ? ORDER BY id DESC LIMIT 1",
+        (tent_id,)
+    )
+    last_row = cursor.fetchone()
+    cursor.execute("SELECT SUM(price) FROM payments_history WHERE tent_id = ?", (tent_id,))
+    total_row = cursor.fetchone()
+    conn.close()
+
+    last_payment = last_row[0] if last_row else None
+    total_paid = total_row[0] if total_row and total_row[0] else None
+
+    await sheets_sync.sync_tent(
+        tent_id=tent_id,
+        status=tent_status_label(end_date),
+        player=nickname,
+        tg_id=tg_id,
+        end_date=end_date,
+        last_payment=last_payment,
+        total_paid=total_paid,
+    )
+
+
+async def extend_tent_db(tent_id, days, price, photo_id, nickname, is_document=False):
+    """Продление — бизнес-логика 'от предыдущей даты, либо от сегодня если просрочено'
+    теперь живёт в firestore_sync.extend_tent (ровно та же формула, что была здесь)."""
+    new_end = await firestore_sync.extend_tent(tent_id, days, price, nickname)
+    if price:
+        await asyncio.to_thread(_mirror_payment_to_sqlite, tent_id, nickname, price, days, photo_id, is_document)
     return new_end
 
 
@@ -385,12 +514,14 @@ class RegisterState(StatesGroup):
 class RenewState(StatesGroup):
     waiting_for_tariff = State()
     waiting_for_photo = State()
+    confirming_photo = State()
 
 # ➕ Состояния для самостоятельного выбора и аренды свободной палатки
 class RentTentState(StatesGroup):
     waiting_for_tent_choice = State()
     waiting_for_tariff = State()
     waiting_for_photo = State()
+    confirming_photo = State()
 
 class BroadcastState(StatesGroup):
     waiting_for_message = State()
@@ -441,6 +572,69 @@ async def cancel_state_handler(callback: types.CallbackQuery, state: FSMContext)
         await show_main_menu(callback.message.chat.id, callback.from_user.id, nick)
 
 
+# === ЛИЧНЫЕ СООБЩЕНИЯ ОТ АДМИНИСТРАЦИИ ИГРОКУ ===
+@dp.callback_query(F.data.startswith("dm_user_"))
+async def dm_user_start(callback: types.CallbackQuery, state: FSMContext):
+    if not can_manage_tents(callback.from_user.id):
+        return
+
+    target_id = int(callback.data.split("_")[2])
+
+    # Проверяем, что у нас вообще есть telegram_id этого игрока в базе — если запись
+    # ссылается на игрока, который никогда не запускал бота (или был удалён), писать некуда.
+    conn = sqlite3.connect("tents.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT nickname FROM users WHERE tg_id = ?", (target_id,))
+    row = cursor.fetchone()
+    conn.close()
+
+    if not row:
+        await callback.answer("❌ У этого игрока нет сохранённого Telegram ID в базе — написать ему нельзя.", show_alert=True)
+        return
+
+    nick = row[0]
+    await state.update_data(dm_target_id=target_id, dm_target_nick=nick)
+    await state.set_state(DMState.waiting_for_message)
+
+    kb = InlineKeyboardBuilder()
+    kb.button(text="❌ Отменить", callback_data="cancel_state")
+
+    await callback.message.answer(
+        f"✉️ Напишите сообщение для игрока <b>{nick}</b> следующим сообщением — оно уйдёт ему в личные "
+        f"от имени бота с пометкой «от администрации».",
+        reply_markup=kb.as_markup(),
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+
+@dp.message(DMState.waiting_for_message)
+async def dm_user_send(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    target_id = data.get("dm_target_id")
+    nick = data.get("dm_target_nick", "Игрок")
+    await state.clear()
+
+    if not target_id:
+        await message.answer("⚠️ Сессия отправки сообщения устарела, начните заново.")
+        return
+
+    if not message.text:
+        await message.answer("❌ Поддерживается только текст. Сообщение не отправлено, попробуйте снова через «✉️ Написать игроку».")
+        return
+
+    delivered = await safe_send(
+        target_id,
+        f"📩 <b>Сообщение от администрации:</b>\n\n{message.text}"
+    )
+
+    if delivered:
+        await message.answer(f"✅ Сообщение доставлено игроку {nick}.")
+        await send_log(f"✉️ <b>Личное сообщение:</b> {message.from_user.full_name} → {nick} (ID: <code>{target_id}</code>)\nТекст: {message.text}")
+    else:
+        await message.answer(f"❌ Не удалось доставить сообщение игроку {nick} — возможно, он заблокировал бота.")
+
+
 # === МЕНЮ ПОЛЬЗОВАТЕЛЯ ===
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext):
@@ -465,7 +659,7 @@ async def cmd_start(message: types.Message, state: FSMContext):
 
 
 async def show_main_menu(chat_id: int, user_id: int, nickname: str):
-    tent = get_user_tent(user_id)
+    tent = await get_user_tent(user_id)
 
     kb = InlineKeyboardBuilder()
     if not tent or not tent[1]:
@@ -511,11 +705,11 @@ async def reply_btn_admin(message: types.Message, state: FSMContext):
     await message.answer(text, reply_markup=markup)
 
 
-@dp.message(F.text == "❌ Отменить")
 @dp.message(Command("cancel"))
-async def reply_btn_cancel(message: types.Message, state: FSMContext):
-    """Работает в ЛЮБОМ состоянии, включая ожидание фото-чека — именно поэтому это
-    надёжный способ прервать загрузку доказательства оплаты, если прикрепили не тот файл."""
+async def cmd_cancel(message: types.Message, state: FSMContext):
+    """Служебная команда для сброса состояния (например, если админ передумал вводить
+    новую дату или текст рассылки). Кнопки-«Отменить» в общем меню больше нет — отмена
+    для игрока доступна только на этапе подтверждения загруженного скрина оплаты."""
     cur_state = await state.get_state()
     await state.clear()
     if cur_state is None:
@@ -578,12 +772,10 @@ async def process_edit_nickname(message: types.Message, state: FSMContext):
         return
 
     save_user(message.from_user.id, username, new_nick)
-
-    conn = sqlite3.connect("tents.db")
-    cursor = conn.cursor()
-    cursor.execute("UPDATE tents SET nickname = ? WHERE tg_id = ?", (new_nick, message.from_user.id))
-    conn.commit()
-    conn.close()
+    await firestore_sync.rename_player_in_tent(message.from_user.id, new_nick)
+    owned = await get_user_tent(message.from_user.id)
+    if owned:
+        await sync_tent_row(owned[0])
 
     await send_log(f"✏️ <b>Смена ника:</b>\nИгрок ID <code>{message.from_user.id}</code> сменил ник на <code>{new_nick}</code>")
 
@@ -595,30 +787,29 @@ async def process_edit_nickname(message: types.Message, state: FSMContext):
 # === ⛺ АРЕНДА СВОБОДНОЙ ПАЛАТКИ ИГРОКОМ ===
 @dp.callback_query(F.data == "choose_free_tent")
 async def show_free_tents_for_user(callback: types.CallbackQuery, state: FSMContext):
-    existing_tent = get_user_tent(callback.from_user.id)
+    existing_tent = await get_user_tent(callback.from_user.id)
     if existing_tent and existing_tent[1]:
         await callback.answer("⚠️ У вас уже есть активная палатка!", show_alert=True)
         return
 
+    all_tents = await get_all_tents_list()
+
     conn = sqlite3.connect("tents.db")
     cursor = conn.cursor()
+    cursor.execute("SELECT tent_id FROM pending_requests")
+    pending_ids = {row[0] for row in cursor.fetchall()}
+    conn.close()
+
     # ВАЖНО: исключаем палатки, на которые уже подана заявка и ждёт подтверждения админом —
     # иначе палатка показывается "свободной" даже когда её уже кто-то занимает (гонка заявок).
-    cursor.execute("""
-        SELECT id FROM tents
-        WHERE tg_id IS NULL
-        AND id NOT IN (SELECT tent_id FROM pending_requests)
-        ORDER BY id ASC
-    """)
-    free_tents = cursor.fetchall()
-    conn.close()
+    free_tents = [t[0] for t in all_tents if not t[1] and t[0] not in pending_ids]
 
     if not free_tents:
         await callback.answer("❌ На данный момент свободных палаток нет!", show_alert=True)
         return
 
     kb = InlineKeyboardBuilder()
-    for (t_id,) in free_tents:
+    for t_id in free_tents:
         kb.button(text=f"⛺ Палатка #{t_id} (Свободна)", callback_data=f"user_rent_tent_{t_id}")
     
     kb.button(text="🔙 Назад", callback_data="back_to_main_menu")
@@ -652,7 +843,7 @@ async def back_to_main_menu_cb(callback: types.CallbackQuery, state: FSMContext)
 async def process_user_selected_tent(callback: types.CallbackQuery, state: FSMContext):
     tent_id = int(callback.data.split("_")[3])
     
-    tent = get_tent(tent_id)
+    tent = await get_tent(tent_id)
     if not tent or tent[1] is not None:
         await callback.answer("❌ Извините, эту палатку только что заняли. Выберите другую.", show_alert=True)
         return
@@ -688,14 +879,9 @@ async def process_user_selected_tariff(callback: types.CallbackQuery, state: FSM
     await state.update_data(tariff_code=tariff_code)
     tariff = TARIFFS[tariff_code]
 
-    kb = InlineKeyboardBuilder()
-    kb.button(text="❌ Отменить", callback_data="back_to_main_menu")
-
     await callback.message.edit_text(
         f"Вы выбрали тариф: {tariff['label']}\n\n"
-        f"📸 Переведите {tariff['price']} 🛢️ нефти в игре и отправьте скриншот/фото чека прямо сюда в чат.\n\n"
-        f"Прикрепили не то? Нажмите «❌ Отменить» внизу экрана.",
-        reply_markup=kb.as_markup()
+        f"📸 Переведите {tariff['price']} 🛢️ нефти в игре и отправьте скриншот/фото чека прямо сюда в чат."
     )
     await state.set_state(RentTentState.waiting_for_photo)
 
@@ -715,34 +901,75 @@ async def process_user_rent_photo(message: types.Message, state: FSMContext):
     if not photo_id:
         await message.answer(
             "❌ Это не похоже на изображение. Пришлите скриншот/фото чека об оплате "
-            "(как фото, либо как файл-изображение), или нажмите «❌ Отменить» внизу экрана."
+            "(как фото, либо как файл-изображение)."
         )
+        return
+
+    # Скрин не отправляется администрации сразу — сначала игрок должен подтвердить,
+    # что прикрепил именно то, что нужно (единственное место, где осталась кнопка «Отмена»).
+    await state.update_data(pending_photo_id=photo_id, pending_is_document=is_document)
+    await state.set_state(RentTentState.confirming_photo)
+
+    kb = InlineKeyboardBuilder()
+    kb.button(text="✅ Подтвердить", callback_data="confirm_photo_yes")
+    kb.button(text="❌ Отмена", callback_data="confirm_photo_no")
+    kb.adjust(2)
+    caption = "📸 Подтвердите, что это верный скрин чека об оплате."
+    if is_document:
+        await message.answer_document(photo_id, caption=caption, reply_markup=kb.as_markup())
+    else:
+        await message.answer_photo(photo_id, caption=caption, reply_markup=kb.as_markup())
+
+
+@dp.message(RentTentState.waiting_for_photo)
+async def process_user_rent_photo_fallback(message: types.Message, state: FSMContext):
+    await message.answer(
+        "📸 Ожидаю скриншот/фото чека об оплате (как фото или файл-изображение).\n"
+        "Просто пришлите его ещё раз."
+    )
+
+
+@dp.callback_query(F.data == "confirm_photo_yes", RentTentState.confirming_photo)
+async def confirm_rent_photo_yes(callback: types.CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    tent_id = data.get("tent_id")
+    tariff_code = data.get("tariff_code")
+    photo_id = data.get("pending_photo_id")
+    is_document = bool(data.get("pending_is_document"))
+    await state.clear()
+
+    if not tent_id or not tariff_code or not photo_id:
+        await callback.answer("❌ Ошибка состояния, попробуйте заново через /start.", show_alert=True)
         return
 
     tariff = TARIFFS[tariff_code]
 
     conn = sqlite3.connect("tents.db")
     cursor = conn.cursor()
-    cursor.execute("SELECT nickname FROM users WHERE tg_id = ?", (message.from_user.id,))
+    cursor.execute("SELECT nickname FROM users WHERE tg_id = ?", (callback.from_user.id,))
     user_row = cursor.fetchone()
     user_nick = user_row[0] if user_row else "Неизвестно"
 
     cursor.execute(
         "INSERT INTO pending_requests (tent_id, user_id, tariff_code, photo_id, is_document) VALUES (?, ?, ?, ?, ?)",
-        (tent_id, message.from_user.id, tariff_code, photo_id, int(is_document))
+        (tent_id, callback.from_user.id, tariff_code, photo_id, int(is_document))
     )
     req_id = cursor.lastrowid
     conn.commit()
     conn.close()
 
-    await message.answer("⏳ Ваша заявка на аренду палатки отправлена Администрации! Ожидайте подтверждения.")
+    try:
+        await callback.message.edit_caption(caption="⏳ Заявка отправлена Администрации! Ожидайте подтверждения.")
+    except Exception:
+        await callback.message.answer("⏳ Заявка отправлена Администрации! Ожидайте подтверждения.")
+    await callback.answer()
 
     kb = InlineKeyboardBuilder()
     kb.button(text="✅ Подтвердить", callback_data=f"appr_{req_id}")
     kb.button(text="❌ Отклонить", callback_data=f"rej_{req_id}")
     kb.adjust(2)
 
-    username = message.from_user.username or "нет"
+    username = callback.from_user.username or "нет"
     caption_text = (
         f"📥 НОВАЯ ЗАЯВКА НА АРЕНДУ ПАЛАТКИ!\n\n"
         f"⛺ Запрошена Палатка №{tent_id}\n"
@@ -756,40 +983,31 @@ async def process_user_rent_photo(message: types.Message, state: FSMContext):
         logging.error(f"Ошибка отправки карточки заявки админу: {e}")
 
 
-@dp.message(RentTentState.waiting_for_photo)
-async def process_user_rent_photo_fallback(message: types.Message):
-    await message.answer(
-        "📸 Ожидаю скриншот/фото чека об оплате (как фото или файл-изображение).\n"
-        "Если прикрепили не то — просто пришлите фото ещё раз, или нажмите «❌ Отменить» внизу экрана."
-    )
-
+@dp.callback_query(F.data == "confirm_photo_no", RentTentState.confirming_photo)
+async def confirm_rent_photo_no(callback: types.CallbackQuery, state: FSMContext):
     await state.clear()
+    try:
+        await callback.message.edit_caption(caption="❌ Отменено. Загрузка скрина сброшена — начните заново через /start.")
+    except Exception:
+        await callback.message.answer("❌ Отменено. Загрузка скрина сброшена — начните заново через /start.")
+    await callback.answer("Операция отменена")
 
 
 @dp.callback_query(F.data == "my_tent")
 async def show_my_tent(callback: types.CallbackQuery):
-    tent = get_user_tent(callback.from_user.id)
+    tent = await get_user_tent(callback.from_user.id)
     if not tent or not tent[1]:
         await callback.message.answer("⏳ За вашим аккаунтом пока не закреплена палатка.\nВыберите в меню 'Арендовать палатку'.")
         return
 
     tent_id, tg_id, nickname, end_date_str = tent
-    now_msk = datetime.now(MSK_TZ).replace(tzinfo=None)
 
     try:
-        end_date = datetime.strptime(end_date_str, "%Y-%m-%d")
-        days_left = (end_date - now_msk).days + 1
-        end_date_formatted = end_date.strftime("%d.%m.%Y")
+        end_date_formatted = datetime.strptime(end_date_str, "%Y-%m-%d").strftime("%d.%m.%Y")
     except Exception:
-        days_left = 0
         end_date_formatted = "Не определено"
 
-    if days_left < 0:
-        status = f"🔴 ПРОСРОЧЕНА на {abs(days_left)} дн."
-    elif days_left <= 2:
-        status = f"🟡 Заканчивается (осталось {days_left} дн.)"
-    else:
-        status = f"🟢 Активна (осталось {days_left} дн.)"
+    status = tent_status_label(end_date_str)
 
     msg = (
         f"⛺ Палатка №{tent_id} ({nickname})\n"
@@ -808,9 +1026,10 @@ async def show_my_tent(callback: types.CallbackQuery):
 @dp.callback_query(F.data.startswith("user_quit_"))
 async def user_quit_tent(callback: types.CallbackQuery):
     tent_id = int(callback.data.split("_")[2])
-    tent = get_tent(tent_id)
+    tent = await get_tent(tent_id)
 
-    clear_tent_db(tent_id)
+    await clear_tent_db(tent_id)
+    await sync_tent_row(tent_id)
     await send_log(f"📦 <b>Отказ от палатки:</b>\nИгрок <code>{tent[2]}</code> (ID: <code>{callback.from_user.id}</code>) самостоятельно освободил палатку №{tent_id}.")
 
     await callback.message.answer(
@@ -830,7 +1049,7 @@ async def select_tariff(callback: types.CallbackQuery, state: FSMContext):
     # любой пользователь мог отправить callback "renew_<номер>" (например, переслав кнопку
     # от другого игрока или просто угадав номер палатки 1-20) и попасть в процесс продления
     # чужой или вообще любой палатки. Теперь продлевать можно только СВОЮ палатку.
-    owned_tent = get_user_tent(callback.from_user.id)
+    owned_tent = await get_user_tent(callback.from_user.id)
     if not owned_tent or owned_tent[1] is None or owned_tent[0] != tent_id:
         await callback.answer("❌ Это не ваша палатка! Продлевать можно только свою палатку.", show_alert=True)
         return
@@ -854,8 +1073,7 @@ async def process_tariff(callback: types.CallbackQuery, state: FSMContext):
 
     await callback.message.answer(
         f"Вы выбрали: {tariff['label']}\n\n"
-        f"📸 Переведите {tariff['price']} 🛢️ нефти в игре и отправьте скриншот/фото чека прямо сюда в чат.\n\n"
-        f"Прикрепили не то? Нажмите «❌ Отменить» внизу экрана."
+        f"📸 Переведите {tariff['price']} 🛢️ нефти в игре и отправьте скриншот/фото чека прямо сюда в чат."
     )
     await state.set_state(RenewState.waiting_for_photo)
 
@@ -871,7 +1089,7 @@ async def process_photo(message: types.Message, state: FSMContext):
         await state.clear()
         return
 
-    owned_tent = get_user_tent(message.from_user.id)
+    owned_tent = await get_user_tent(message.from_user.id)
     if not owned_tent or owned_tent[1] is None or owned_tent[0] != tent_id:
         await message.answer("❌ Это не ваша палатка! Продление отменено.")
         await state.clear()
@@ -881,8 +1099,50 @@ async def process_photo(message: types.Message, state: FSMContext):
     if not photo_id:
         await message.answer(
             "❌ Это не похоже на изображение. Пришлите скриншот/фото чека об оплате "
-            "(как фото, либо как файл-изображение), или нажмите «❌ Отменить» внизу экрана."
+            "(как фото, либо как файл-изображение)."
         )
+        return
+
+    # Скрин не отправляется администрации сразу — сначала игрок должен подтвердить,
+    # что прикрепил именно то, что нужно (единственное место, где осталась кнопка «Отмена»).
+    await state.update_data(pending_photo_id=photo_id, pending_is_document=is_document)
+    await state.set_state(RenewState.confirming_photo)
+
+    kb = InlineKeyboardBuilder()
+    kb.button(text="✅ Подтвердить", callback_data="confirm_photo_yes")
+    kb.button(text="❌ Отмена", callback_data="confirm_photo_no")
+    kb.adjust(2)
+    caption = "📸 Подтвердите, что это верный скрин чека об оплате."
+    if is_document:
+        await message.answer_document(photo_id, caption=caption, reply_markup=kb.as_markup())
+    else:
+        await message.answer_photo(photo_id, caption=caption, reply_markup=kb.as_markup())
+
+
+@dp.message(RenewState.waiting_for_photo)
+async def process_photo_fallback(message: types.Message, state: FSMContext):
+    await message.answer(
+        "📸 Ожидаю скриншот/фото чека об оплате (как фото или файл-изображение).\n"
+        "Просто пришлите его ещё раз."
+    )
+
+
+@dp.callback_query(F.data == "confirm_photo_yes", RenewState.confirming_photo)
+async def confirm_renew_photo_yes(callback: types.CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    tent_id = data.get("tent_id")
+    tariff_code = data.get("tariff_code")
+    photo_id = data.get("pending_photo_id")
+    is_document = bool(data.get("pending_is_document"))
+    await state.clear()
+
+    if not tent_id or not tariff_code or not photo_id:
+        await callback.answer("❌ Ошибка состояния, попробуйте заново через 'Моя палатка'.", show_alert=True)
+        return
+
+    owned_tent = await get_user_tent(callback.from_user.id)
+    if not owned_tent or owned_tent[1] is None or owned_tent[0] != tent_id:
+        await callback.answer("❌ Это не ваша палатка! Продление отменено.", show_alert=True)
         return
 
     tariff = TARIFFS[tariff_code]
@@ -891,22 +1151,26 @@ async def process_photo(message: types.Message, state: FSMContext):
     cursor = conn.cursor()
     cursor.execute(
         "INSERT INTO pending_requests (tent_id, user_id, tariff_code, photo_id, is_document) VALUES (?, ?, ?, ?, ?)",
-        (tent_id, message.from_user.id, tariff_code, photo_id, int(is_document))
+        (tent_id, callback.from_user.id, tariff_code, photo_id, int(is_document))
     )
     req_id = cursor.lastrowid
     conn.commit()
     conn.close()
 
-    await message.answer("⏳ Ваша заявка отправлена Администрации! Ожидайте подтверждения.")
+    try:
+        await callback.message.edit_caption(caption="⏳ Заявка отправлена Администрации! Ожидайте подтверждения.")
+    except Exception:
+        await callback.message.answer("⏳ Заявка отправлена Администрации! Ожидайте подтверждения.")
+    await callback.answer()
 
     kb = InlineKeyboardBuilder()
     kb.button(text="✅ Подтвердить", callback_data=f"appr_{req_id}")
     kb.button(text="❌ Отклонить", callback_data=f"rej_{req_id}")
     kb.adjust(2)
 
-    tent = get_tent(tent_id)
+    tent = await get_tent(tent_id)
     user_nick = tent[2] if tent and tent[2] else "Неизвестно"
-    username = message.from_user.username or "нет"
+    username = callback.from_user.username or "нет"
 
     caption_text = (
         f"📥 НОВАЯ ЗАЯВКА НА ПРОДЛЕНИЕ!\n\n"
@@ -920,15 +1184,15 @@ async def process_photo(message: types.Message, state: FSMContext):
     except Exception as e:
         logging.error(f"Ошибка отправки карточки: {e}")
 
+
+@dp.callback_query(F.data == "confirm_photo_no", RenewState.confirming_photo)
+async def confirm_renew_photo_no(callback: types.CallbackQuery, state: FSMContext):
     await state.clear()
-
-
-@dp.message(RenewState.waiting_for_photo)
-async def process_photo_fallback(message: types.Message):
-    await message.answer(
-        "📸 Ожидаю скриншот/фото чека об оплате (как фото или файл-изображение).\n"
-        "Если прикрепили не то — просто пришлите фото ещё раз, или нажмите «❌ Отменить» внизу экрана."
-    )
+    try:
+        await callback.message.edit_caption(caption="❌ Отменено. Загрузка скрина сброшена.")
+    except Exception:
+        await callback.message.answer("❌ Отменено. Загрузка скрина сброшена.")
+    await callback.answer("Операция отменена")
 
 
 @dp.callback_query(F.data.startswith("appr_"))
@@ -957,7 +1221,7 @@ async def approve_payment(callback: types.CallbackQuery):
     u_row = cursor.fetchone()
     user_nick = u_row[0] if u_row else "Игрок"
 
-    tent_data = get_tent(tent_id)
+    tent_data = await get_tent(tent_id)
     is_currently_empty = (tent_data[1] is None)
 
     # Защита от гонки заявок: пока эта заявка ждала подтверждения, палатку мог уже занять
@@ -985,17 +1249,10 @@ async def approve_payment(callback: types.CallbackQuery):
         return
 
     if is_currently_empty:
-        assign_tent_db(tent_id, user_id, user_nick, days=tariff["days"])
-        
-        now_msk = datetime.now(MSK_TZ)
-        today = now_msk.strftime("%d.%m.%Y %H:%M")
-        cursor.execute(
-            "INSERT INTO payments_history (tent_id, nickname, price, days, photo_id, pay_date, is_document) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (tent_id, user_nick, tariff["price"], tariff["days"], photo_id, today, int(is_document))
-        )
-        conn.commit()
-        
-        updated_tent = get_tent(tent_id)
+        await assign_tent_db(tent_id, user_id, user_nick, days=tariff["days"], price=tariff["price"],
+                              photo_id=photo_id, is_document=is_document)
+
+        updated_tent = await get_tent(tent_id)
         formatted_end_date = datetime.strptime(updated_tent[3], "%Y-%m-%d").strftime('%d.%m.%Y')
 
         # Палатка только что занята — все ОСТАЛЬНЫЕ ожидающие заявки на неё (от других игроков)
@@ -1014,12 +1271,13 @@ async def approve_payment(callback: types.CallbackQuery):
                 except Exception:
                     pass
     else:
-        new_end = extend_tent_db(tent_id, tariff["days"], tariff["price"], photo_id, user_nick, is_document=is_document)
+        new_end = await extend_tent_db(tent_id, tariff["days"], tariff["price"], photo_id, user_nick, is_document=is_document)
         formatted_end_date = new_end.strftime('%d.%m.%Y')
 
     cursor.execute("DELETE FROM pending_requests WHERE id = ?", (req_id,))
     conn.commit()
     conn.close()
+    await sync_tent_row(tent_id)
 
     receipt_id = f"R-{datetime.now(MSK_TZ).strftime('%d%m%Y-%H%M%S')}"
     receipt_text = generate_receipt_text(receipt_id, user_nick, tent_id, tariff["days"], tariff["price"], formatted_end_date)
@@ -1166,15 +1424,13 @@ async def send_db_backup():
 
 # === 🔔 АВТОМАТИЧЕСКИЕ НАПОМИНАНИЯ ИГРОКАМ В ЛС (В 12:00 МСК) ===
 async def check_tent_expirations():
-    conn = sqlite3.connect("tents.db")
-    cursor = conn.cursor()
-    cursor.execute("SELECT id, tg_id, nickname, end_date FROM tents WHERE tg_id IS NOT NULL AND end_date IS NOT NULL")
-    tents = cursor.fetchall()
-    conn.close()
+    tents = await get_all_tents_list()
 
     now_msk_date = datetime.now(MSK_TZ).date()
 
     for tent_id, tg_id, nick, end_date_str in tents:
+        if not tg_id or not end_date_str:
+            continue
         try:
             end_dt = datetime.strptime(end_date_str, "%Y-%m-%d").date()
             days_left = (end_dt - now_msk_date).days
@@ -1207,7 +1463,7 @@ async def start_edit_date(callback: types.CallbackQuery, state: FSMContext):
         return
 
     tent_id = int(callback.data.split("_")[2])
-    tent = get_tent(tent_id)
+    tent = await get_tent(tent_id)
 
     if not tent or not tent[2]:
         await callback.answer("❌ У этой палатки нет арендатора!", show_alert=True)
@@ -1262,8 +1518,9 @@ async def process_new_date(message: types.Message, state: FSMContext):
         )
         return
 
-    tent = get_tent(tent_id)
-    update_tent_date_db(tent_id, parsed_date)
+    tent = await get_tent(tent_id)
+    await update_tent_date_db(tent_id, parsed_date)
+    await sync_tent_row(tent_id)
 
     await send_log(
         f"✏️ <b>Администратор вручную изменил дату аренды:</b>\n"
@@ -1606,15 +1863,10 @@ async def cmd_stats(message: types.Message):
 
 async def render_admin_panel(user_id: int):
     """Строит текст и inline-клавиатуру админ-панели с учётом прав конкретного user_id."""
-    conn = sqlite3.connect("tents.db")
-    cursor = conn.cursor()
-    cursor.execute("SELECT id, nickname, end_date FROM tents")
-    tents = cursor.fetchall()
-    conn.close()
+    tents = await get_all_tents_list()
 
     kb = InlineKeyboardBuilder()
-    for t in tents:
-        t_id, nick, end = t
+    for t_id, tg_id, nick, end in tents:
         btn_text = f"#{t_id} 🟢 {nick}" if nick else f"#{t_id} ⚪ Свободна"
         kb.button(text=btn_text, callback_data=f"adm_tent_{t_id}")
 
@@ -1744,18 +1996,16 @@ async def process_stats_period(callback: types.CallbackQuery):
     conn = sqlite3.connect("tents.db")
     cursor = conn.cursor()
 
-    cursor.execute("SELECT COUNT(*) FROM tents WHERE nickname IS NOT NULL")
-    occupied_count = cursor.fetchone()[0]
-
     cursor.execute("SELECT COUNT(*) FROM users")
     users_count = cursor.fetchone()[0]
 
     cursor.execute("SELECT price, pay_date FROM payments_history")
     all_payments = cursor.fetchall()
-
-    cursor.execute("SELECT id, nickname, end_date FROM tents WHERE nickname IS NOT NULL")
-    tents = cursor.fetchall()
     conn.close()
+
+    all_tents = await get_all_tents_list()
+    occupied_tents = [t for t in all_tents if t[1] is not None]
+    occupied_count = len(occupied_tents)
 
     total_earned = 0
     total_deals = 0
@@ -1786,7 +2036,7 @@ async def process_stats_period(callback: types.CallbackQuery):
     total_deals = max(0, total_deals + deals_off)
 
     expiring_list = ""
-    for t_id, nick, end_str in tents:
+    for t_id, tg_id, nick, end_str in occupied_tents:
         try:
             end_date = datetime.strptime(end_str, "%Y-%m-%d")
             days_left = (end_date - now_msk).days + 1
@@ -1900,23 +2150,28 @@ async def adm_tent_manage(callback: types.CallbackQuery):
         return
 
     tent_id = int(callback.data.split("_")[2])
-    tent = get_tent(tent_id)
+    tent = await get_tent(tent_id)
     _, tg_id, nickname, end_date = tent
 
     kb = InlineKeyboardBuilder()
 
     if not nickname:
         text = f"⛺ Палатка №{tent_id}\nСтатус: ⚪ Свободна"
+
+        all_tents = await get_all_tents_list()
+        occupied_tg_ids = {t[1] for t in all_tents if t[1] is not None}
+
         conn = sqlite3.connect("tents.db")
         cursor = conn.cursor()
-        cursor.execute("SELECT u.tg_id, u.nickname FROM users u LEFT JOIN tents t ON u.tg_id = t.tg_id WHERE t.id IS NULL")
-        unassigned = cursor.fetchall()
+        cursor.execute("SELECT tg_id, nickname FROM users")
+        all_users = cursor.fetchall()
         conn.close()
+        unassigned = [(u_id, u_nick) for u_id, u_nick in all_users if u_id not in occupied_tg_ids]
 
         if unassigned:
             text += "\n\nИгроки без палатки:"
             for u_id, u_nick in unassigned:
-                kb.button(text=f"➕ Выдать {u_nick}", callback_data=f"give_{tent_id}_{u_id}_{u_nick}")
+                kb.button(text=f"➕ Выдать {u_nick}", callback_data=f"give_{tent_id}_{u_id}")
     else:
         formatted_end = end_date or "Не установлена"
         if end_date:
@@ -1947,10 +2202,27 @@ async def process_give(callback: types.CallbackQuery):
     if not can_manage_tents(callback.from_user.id):
         return
 
-    _, tent_id, user_id, nickname = callback.data.split("_")
-    assign_tent_db(int(tent_id), int(user_id), nickname)
+    _, tent_id, user_id = callback.data.split("_")
+    tent_id, user_id = int(tent_id), int(user_id)
 
-    tent = get_tent(int(tent_id))
+    # Ник берём СВЕЖИЙ из базы по user_id, а не из текста кнопки — раньше ник встраивался
+    # прямо в callback_data и если в нём была "_" (обычное дело для Minecraft-ников,
+    # например "Cool_Guy"), разбор строки падал с ошибкой и выдача палатки просто не
+    # срабатывала без какого-либо вменяемого сообщения администратору.
+    conn = sqlite3.connect("tents.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT nickname FROM users WHERE tg_id = ?", (user_id,))
+    row = cursor.fetchone()
+    conn.close()
+    if not row:
+        await callback.answer("❌ Игрок не найден в базе (возможно, был удалён). Обновите список.", show_alert=True)
+        return
+    nickname = row[0]
+
+    await assign_tent_db(tent_id, user_id, nickname)
+    await sync_tent_row(tent_id)
+
+    tent = await get_tent(tent_id)
     end_date_str = tent[3] if tent else None
     try:
         formatted_end = datetime.strptime(end_date_str, "%Y-%m-%d").strftime("%d.%m.%Y")
@@ -1959,22 +2231,18 @@ async def process_give(callback: types.CallbackQuery):
 
     # Уведомляем самого игрока о том, что ему выдали палатку — раньше он узнавал об этом
     # только зайдя в бота случайно, никакого сообщения не приходило.
-    try:
-        await bot.send_message(
-            chat_id=int(user_id),
-            text=(
-                f"🎉 <b>Вам выдана палатка!</b>\n\n"
-                f"⛺ Палатка №{tent_id}\n"
-                f"📅 Оплачена до: {formatted_end} 23:59:59\n\n"
-                f"Откройте /start → «⛺ Моя палатка», чтобы посмотреть детали или продлить аренду."
-            ),
-            parse_mode="HTML"
-        )
-    except Exception as e:
-        logging.error(f"❌ Не удалось уведомить игрока {user_id} о выдаче палатки: {e}")
+    delivered = await safe_send(
+        user_id,
+        f"🎉 <b>Вам выдана палатка!</b>\n\n"
+        f"⛺ Палатка №{tent_id}\n"
+        f"📅 Оплачена до: {formatted_end} 23:59:59\n\n"
+        f"Откройте /start → «⛺ Моя палатка», чтобы посмотреть детали или продлить аренду."
+    )
+    if not delivered:
+        logging.error(f"❌ Не удалось уведомить игрока {user_id} о выдаче палатки {tent_id} (возможно, заблокировал бота)")
 
     await send_log(f"⛺ <b>Выдана палатка:</b>\nПалатка №{tent_id} выдана игроку <code>{nickname}</code> (ID: <code>{user_id}</code>)")
-    await callback.answer(f"Палатка №{tent_id} выдана {nickname}!")
+    await callback.answer(f"Палатка №{tent_id} выдана {nickname}!" + ("" if delivered else " (⚠️ уведомить не удалось)"))
     await show_admin_panel(callback.message.chat.id, callback.from_user.id)
 
 
@@ -1984,8 +2252,10 @@ async def process_clear(callback: types.CallbackQuery):
         return
 
     _, tent_id, user_id = callback.data.split("_")
-    tent = get_tent(int(tent_id))
-    clear_tent_db(int(tent_id))
+    tent_id = int(tent_id)
+    tent = await get_tent(tent_id)
+    await clear_tent_db(tent_id)
+    await sync_tent_row(tent_id)
 
     if tent and tent[1]:
         try:
@@ -2064,7 +2334,7 @@ async def process_del_user_start(callback: types.CallbackQuery, state: FSMContex
 
 
 async def finalize_delete_user(chat_id: int, user_id: int, nick: str, reason: str | None):
-    delete_user_db(user_id)
+    await delete_user_db(user_id)
     reason_txt = reason.strip() if reason and reason.strip() else "не указана"
 
     try:
@@ -2130,6 +2400,32 @@ async def main():
     scheduler.add_job(send_db_backup, 'interval', days=3)
     scheduler.add_job(check_tent_expirations, 'cron', hour=12, minute=0)
     scheduler.start()
+
+    # Одноразовая безопасная миграция: досоздаёт в Firestore только те палатки, которых
+    # там ещё вообще нет. Если документ для номера палатки уже существует — он считается
+    # авторитетным (например, уже введён через веб-приложение) и НЕ перезаписывается.
+    if firestore_sync.is_configured():
+        try:
+            report = await firestore_sync.migrate_sqlite_if_missing()
+            if report.get("no_firestore"):
+                logging.error("❌ Firestore недоступен при старте — проверьте ключ FIREBASE_SERVICE_ACCOUNT_FILE и доступ в интернет.")
+            elif report.get("migrated"):
+                await send_log(
+                    f"🔄 <b>Миграция в Firestore при старте:</b>\n"
+                    f"Досозданы палатки: {report['migrated']}\n"
+                    f"Уже существовали (не тронуты): {report['skipped_existing'] or '—'}"
+                )
+        except Exception as e:
+            logging.error(f"❌ Ошибка миграции SQLite → Firestore при старте: {e}")
+    else:
+        logging.warning("⚠️ FIREBASE_SERVICE_ACCOUNT_FILE не настроен — бот не сможет читать/писать палатки!")
+
+    if sheets_sync.is_configured():
+        try:
+            for tid in range(1, 21):
+                await sync_tent_row(tid)
+        except Exception as e:
+            logging.error(f"❌ Не удалось выполнить стартовую синхронизацию с Google Sheets: {e}")
 
     await send_log("🟢 <b>Бот успешно запущен и готов к работе!</b>")
     print("🤖 Бот запущен! Планировщик (бэкапы и напоминания) активен.")
