@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import time
 from datetime import datetime
 
 from config import (
@@ -17,6 +18,8 @@ _client = None
 _worksheet = None
 _warned_not_configured = False
 _warned_error = False
+_tent_rows = None
+_sheets_retry_after = 0.0
 
 
 def is_configured() -> bool:
@@ -52,12 +55,20 @@ def _get_worksheet():
 
 
 def _upsert_row_sync(row_values: list, tent_id: int):
+    global _tent_rows
     ws = _get_worksheet()
-    cell = ws.find(str(tent_id), in_column=1)
-    if cell:
-        ws.update(f"A{cell.row}:H{cell.row}", [row_values])
+    if _tent_rows is None:
+        _tent_rows = {}
+        for row_number, value in enumerate(ws.col_values(1)[1:], start=2):
+            value = str(value).strip()
+            if value.isdigit():
+                _tent_rows[int(value)] = row_number
+    row_number = _tent_rows.get(int(tent_id))
+    if row_number:
+        ws.update(f"A{row_number}:H{row_number}", [row_values])
     else:
         ws.append_row(row_values)
+        _tent_rows[int(tent_id)] = len(ws.col_values(1))
 
 
 async def sync_tent(tent_id: int, status: str, player: str, tg_id, end_date: str,
@@ -76,6 +87,10 @@ async def sync_tent(tent_id: int, status: str, player: str, tg_id, end_date: str
             _warned_not_configured = True
         return
 
+    global _sheets_retry_after
+    if time.monotonic() < _sheets_retry_after:
+        return
+
     row = [
         tent_id,
         status,
@@ -89,6 +104,10 @@ async def sync_tent(tent_id: int, status: str, player: str, tg_id, end_date: str
     try:
         await asyncio.to_thread(_upsert_row_sync, row, tent_id)
     except Exception as e:
+        if "429" in str(e) or "Quota exceeded" in str(e):
+            _sheets_retry_after = time.monotonic() + 60
+            logging.warning("Google Sheets временно ограничил запросы; синхронизация приостановлена на 60 секунд.")
+            return
         logging.error(f"❌ Ошибка синхронизации палатки №{tent_id} с Google Sheets: {e}")
         _warned_error = True
 

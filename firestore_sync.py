@@ -29,6 +29,7 @@ stats_corrections, sent_reminders) остаются в SQLite как есть �
 import asyncio
 import logging
 import sqlite3
+import threading
 import time
 from datetime import datetime, timedelta
 
@@ -37,6 +38,7 @@ from config import FIREBASE_SERVICE_ACCOUNT_FILE
 _app = None
 _db = None
 _init_failed = False
+_init_lock = threading.Lock()
 
 
 def is_configured() -> bool:
@@ -49,18 +51,24 @@ def _ensure_init():
     global _app, _db, _init_failed
     if _db is not None or _init_failed:
         return
-    if not is_configured():
-        _init_failed = True
-        return
-    try:
-        import firebase_admin
-        from firebase_admin import credentials, firestore
-        cred = credentials.Certificate(FIREBASE_SERVICE_ACCOUNT_FILE)
-        _app = firebase_admin.initialize_app(cred)
-        _db = firestore.client()
-    except Exception as e:
-        logging.error(f"❌ Не удалось инициализировать Firebase Admin SDK: {e}")
-        _init_failed = True
+    with _init_lock:
+        if _db is not None or _init_failed:
+            return
+        if not is_configured():
+            _init_failed = True
+            return
+        try:
+            import firebase_admin
+            from firebase_admin import credentials, firestore
+            try:
+                _app = firebase_admin.get_app()
+            except ValueError:
+                cred = credentials.Certificate(FIREBASE_SERVICE_ACCOUNT_FILE)
+                _app = firebase_admin.initialize_app(cred)
+            _db = firestore.client(app=_app)
+        except Exception as e:
+            logging.error(f"❌ Не удалось инициализировать Firebase Admin SDK: {e}")
+            _init_failed = True
 
 
 def _find_tent_doc_sync(tent_id: int):
@@ -69,7 +77,8 @@ def _find_tent_doc_sync(tent_id: int):
     _ensure_init()
     if _db is None:
         return None
-    query = _db.collection("tents").where("tentNum", "==", tent_id).limit(1).get()
+    from google.cloud.firestore_v1.base_query import FieldFilter
+    query = _db.collection("tents").where(filter=FieldFilter("tentNum", "==", tent_id)).limit(1).get()
     for doc in query:
         return doc
     return None
@@ -88,6 +97,15 @@ def _tuple_from_doc(tent_id: int, doc) -> tuple:
     return (tent_id, data.get("tgId"), data.get("player"), data.get("endDate"))
 
 
+def _tent_data_sync(tent_id: int) -> dict:
+    doc = _find_tent_doc_sync(tent_id)
+    return doc.to_dict() if doc is not None else {}
+
+
+async def get_tent_data(tent_id: int) -> dict:
+    return await asyncio.to_thread(_tent_data_sync, tent_id)
+
+
 # === ЧТЕНИЕ ===
 
 def _get_tent_sync(tent_id: int) -> tuple:
@@ -103,7 +121,11 @@ def _get_user_tent_sync(tg_id: int):
     _ensure_init()
     if _db is None:
         return None
-    query = _db.collection("tents").where("tgId", "==", tg_id).where("occupied", "==", True).limit(1).get()
+    from google.cloud.firestore_v1.base_query import FieldFilter
+    query = (_db.collection("tents")
+             .where(filter=FieldFilter("tgId", "==", tg_id))
+             .where(filter=FieldFilter("occupied", "==", True))
+             .limit(1).get())
     for doc in query:
         data = doc.to_dict() or {}
         return (data.get("tentNum"), data.get("tgId"), data.get("player"), data.get("endDate"))
@@ -130,6 +152,306 @@ def _get_all_tents_sync() -> list:
 
 async def get_all_tents() -> list:
     return await asyncio.to_thread(_get_all_tents_sync)
+
+
+def _get_tent_catalog_sources_sync() -> list:
+    _ensure_init()
+    if _db is None:
+        return []
+    result = []
+    for doc in _db.collection("tents").stream():
+        data = doc.to_dict() or {}
+        if data.get("tentNum"):
+            result.append({"id": doc.id, "tentNum": data.get("tentNum"), "player": data.get("player", ""), "shopSheet": data.get("shopSheet", "")})
+    return result
+
+
+async def get_tent_catalog_sources() -> list:
+    return await asyncio.to_thread(_get_tent_catalog_sources_sync)
+
+
+def _get_products_sync(tent_id: int) -> list:
+    _ensure_init()
+    if _db is None:
+        return []
+    from google.cloud.firestore_v1.base_query import FieldFilter
+    result = []
+    for doc in _db.collection("products").where(filter=FieldFilter("tentNum", "==", tent_id)).stream():
+        result.append({"id": doc.id, **(doc.to_dict() or {})})
+    return result
+
+
+async def get_products(tent_id: int) -> list:
+    return await asyncio.to_thread(_get_products_sync, tent_id)
+
+
+def _get_all_products_sync() -> list:
+    _ensure_init()
+    if _db is None:
+        return []
+    return [{"id": doc.id, **(doc.to_dict() or {})} for doc in _db.collection("products").stream()]
+
+
+async def get_all_products() -> list:
+    return await asyncio.to_thread(_get_all_products_sync)
+
+
+def _upsert_bot_document_sync(collection_name: str, document_id: str, data: dict):
+    _ensure_init()
+    if _db is None:
+        raise RuntimeError("Firestore не настроен или недоступен")
+    _db.collection(collection_name).document(document_id).set(data, merge=True)
+
+
+async def upsert_bot_document(collection_name: str, document_id: str, data: dict):
+    await asyncio.to_thread(_upsert_bot_document_sync, collection_name, document_id, data)
+
+
+def _get_bot_document_sync(collection_name: str, document_id: str) -> dict:
+    _ensure_init()
+    if _db is None:
+        return {}
+    snapshot = _db.collection(collection_name).document(document_id).get()
+    return {"id": snapshot.id, **(snapshot.to_dict() or {})} if snapshot.exists else {}
+
+
+async def get_bot_document(collection_name: str, document_id: str) -> dict:
+    return await asyncio.to_thread(_get_bot_document_sync, collection_name, document_id)
+
+
+def _list_bot_documents_sync(collection_name: str) -> list:
+    _ensure_init()
+    if _db is None:
+        return []
+    return [{"id": doc.id, **(doc.to_dict() or {})} for doc in _db.collection(collection_name).stream()]
+
+
+async def list_bot_documents(collection_name: str) -> list:
+    return await asyncio.to_thread(_list_bot_documents_sync, collection_name)
+
+
+def _delete_bot_document_sync(collection_name: str, document_id: str):
+    _ensure_init()
+    if _db is not None:
+        _db.collection(collection_name).document(document_id).delete()
+
+
+async def delete_bot_document(collection_name: str, document_id: str):
+    await asyncio.to_thread(_delete_bot_document_sync, collection_name, document_id)
+
+
+def _upsert_product_sync(product_id: str, data: dict):
+    _ensure_init()
+    if _db is None:
+        raise RuntimeError("Firestore не настроен или недоступен")
+    now_ms = int(time.time() * 1000)
+    payload = {**data, "updatedAt": now_ms}
+    if product_id:
+        _db.collection("products").document(product_id).set(payload, merge=True)
+        return product_id
+    return _db.collection("products").add({**payload, "createdAt": now_ms})[1].id
+
+
+async def upsert_product(product_id: str, data: dict) -> str:
+    return await asyncio.to_thread(_upsert_product_sync, product_id, data)
+
+
+def _sync_product_from_sheet_sync(product_id: str, data: dict):
+    _ensure_init()
+    if _db is None:
+        raise RuntimeError("Firestore не настроен или недоступен")
+    sync_at = int(data.get("sourceUpdatedAt") or time.time() * 1000)
+    payload = {**data, "updatedAt": sync_at, "lastSheetSyncAt": sync_at}
+    _db.collection("products").document(product_id).set(payload, merge=True)
+
+
+async def sync_product_from_sheet(product_id: str, data: dict):
+    await asyncio.to_thread(_sync_product_from_sheet_sync, product_id, data)
+
+
+def _mark_product_sheet_synced_sync(product_id: str, sync_at: int):
+    _ensure_init()
+    if _db is None:
+        raise RuntimeError("Firestore не настроен или недоступен")
+    _db.collection("products").document(product_id).update({"lastSheetSyncAt": sync_at})
+
+
+async def mark_product_sheet_synced(product_id: str, sync_at: int):
+    await asyncio.to_thread(_mark_product_sheet_synced_sync, product_id, sync_at)
+
+
+def _delete_product_sync(product_id: str):
+    _ensure_init()
+    if _db is None:
+        raise RuntimeError("Firestore не настроен или недоступен")
+    _db.collection("products").document(product_id).delete()
+
+
+async def delete_product(product_id: str):
+    await asyncio.to_thread(_delete_product_sync, product_id)
+
+
+def _get_partner_requests_sync(tg_id: int) -> list:
+    _ensure_init()
+    if _db is None:
+        return []
+    from google.cloud.firestore_v1.base_query import FieldFilter
+    result = []
+    for doc in _db.collection("partner_requests").where(filter=FieldFilter("status", "==", "pending")).stream():
+        data = doc.to_dict() or {}
+        if int(data.get("ownerTgId", 0)) == int(tg_id) or int(data.get("requesterTgId", 0)) == int(tg_id):
+            result.append({"id": doc.id, **data})
+    return result
+
+
+async def get_partner_requests(tg_id: int) -> list:
+    return await asyncio.to_thread(_get_partner_requests_sync, tg_id)
+
+
+def _get_pending_partner_requests_sync() -> list:
+    _ensure_init()
+    if _db is None:
+        return []
+    from google.cloud.firestore_v1.base_query import FieldFilter
+    result = []
+    query = _db.collection("partner_requests").where(filter=FieldFilter("status", "==", "pending")).stream()
+    for doc in query:
+        result.append({"id": doc.id, **(doc.to_dict() or {})})
+    return result
+
+
+async def get_pending_partner_requests() -> list:
+    return await asyncio.to_thread(_get_pending_partner_requests_sync)
+
+
+def _mark_partner_request_notified_sync(request_id: str, recipient: str):
+    _ensure_init()
+    if _db is None:
+        return
+    _db.collection("partner_requests").document(request_id).update({f"{recipient}NotifiedAt": int(time.time() * 1000)})
+
+
+async def mark_partner_request_notified(request_id: str, recipient: str):
+    await asyncio.to_thread(_mark_partner_request_notified_sync, request_id, recipient)
+
+
+def _get_pending_rental_requests_sync() -> list:
+    _ensure_init()
+    if _db is None:
+        return []
+    from google.cloud.firestore_v1.base_query import FieldFilter
+    result = []
+    query = _db.collection("rental_requests").where(filter=FieldFilter("status", "==", "pending")).stream()
+    for doc in query:
+        result.append({"id": doc.id, **(doc.to_dict() or {})})
+    return result
+
+
+async def get_pending_rental_requests() -> list:
+    return await asyncio.to_thread(_get_pending_rental_requests_sync)
+
+
+def _get_pending_support_requests_sync() -> list:
+    _ensure_init()
+    if _db is None:
+        return []
+    from google.cloud.firestore_v1.base_query import FieldFilter
+    result = []
+    for doc in _db.collection("support_requests").where(filter=FieldFilter("status", "==", "pending")).stream():
+        result.append({"id": doc.id, **(doc.to_dict() or {})})
+    return result
+
+
+async def get_pending_support_requests() -> list:
+    return await asyncio.to_thread(_get_pending_support_requests_sync)
+
+
+def _mark_support_request_notified_sync(request_id: str):
+    _ensure_init()
+    if _db is not None:
+        _db.collection("support_requests").document(request_id).update({"adminNotifiedAt": int(time.time() * 1000)})
+
+
+async def mark_support_request_notified(request_id: str):
+    await asyncio.to_thread(_mark_support_request_notified_sync, request_id)
+
+
+def _get_rental_request_sync(request_id: str) -> dict:
+    _ensure_init()
+    if _db is None:
+        return {}
+    snapshot = _db.collection("rental_requests").document(request_id).get()
+    return {"id": snapshot.id, **(snapshot.to_dict() or {})} if snapshot.exists else {}
+
+
+async def get_rental_request(request_id: str) -> dict:
+    return await asyncio.to_thread(_get_rental_request_sync, request_id)
+
+
+def _mark_rental_request_notified_sync(request_id: str):
+    _ensure_init()
+    if _db is not None:
+        _db.collection("rental_requests").document(request_id).update({"adminNotifiedAt": int(time.time() * 1000)})
+
+
+async def mark_rental_request_notified(request_id: str):
+    await asyncio.to_thread(_mark_rental_request_notified_sync, request_id)
+
+
+def _resolve_rental_request_sync(request_id: str, status: str):
+    _ensure_init()
+    if _db is None:
+        raise RuntimeError("Firestore не настроен или недоступен")
+    ref = _db.collection("rental_requests").document(request_id)
+    snapshot = ref.get()
+    data = snapshot.to_dict() or {}
+    if data.get("status") != "pending":
+        return data
+    ref.update({"status": status, "resolvedAt": int(time.time() * 1000)})
+    return data
+
+
+async def resolve_rental_request(request_id: str, status: str) -> dict:
+    return await asyncio.to_thread(_resolve_rental_request_sync, request_id, status)
+
+
+def _create_partner_request_sync(data: dict) -> str:
+    _ensure_init()
+    if _db is None:
+        raise RuntimeError("Firestore не настроен или недоступен")
+    now_ms = int(time.time() * 1000)
+    ref = _db.collection("partner_requests").add({**data, "status": "pending", "createdAt": now_ms})[1]
+    return ref.id
+
+
+async def create_partner_request(data: dict) -> str:
+    return await asyncio.to_thread(_create_partner_request_sync, data)
+
+
+def _resolve_partner_request_sync(request_id: str, approve: bool):
+    _ensure_init()
+    if _db is None:
+        raise RuntimeError("Firestore не настроен или недоступен")
+    request_ref = _db.collection("partner_requests").document(request_id)
+    snapshot = request_ref.get()
+    data = snapshot.to_dict() or {}
+    if data.get("status") != "pending":
+        return
+    status = "approved" if approve else "rejected"
+    request_ref.update({"status": status, "resolvedAt": int(time.time() * 1000)})
+    if approve:
+        tent_ref = _find_tent_doc_sync(int(data["tentNum"]))
+        if tent_ref is not None:
+            tent_ref.reference.update({
+                "partnerTgId": int(data["requesterTgId"]),
+                "partnerUsername": data.get("requesterUsername", ""),
+                "partnerMinecraftNick": data.get("requesterMinecraftNick", ""),
+                "updatedAt": int(time.time() * 1000),
+            })
+
+
+async def resolve_partner_request(request_id: str, approve: bool):
+    await asyncio.to_thread(_resolve_partner_request_sync, request_id, approve)
 
 
 # === ЗАПИСЬ ===
@@ -286,7 +608,11 @@ def _rename_player_sync(tg_id: int, new_nickname: str):
     _ensure_init()
     if _db is None:
         return
-    query = _db.collection("tents").where("tgId", "==", tg_id).where("occupied", "==", True).limit(1).get()
+    from google.cloud.firestore_v1.base_query import FieldFilter
+    query = (_db.collection("tents")
+             .where(filter=FieldFilter("tgId", "==", tg_id))
+             .where(filter=FieldFilter("occupied", "==", True))
+             .limit(1).get())
     for doc in query:
         doc.reference.update({"player": new_nickname, "updatedAt": int(time.time() * 1000)})
 
@@ -300,3 +626,162 @@ async def rename_player_in_tent(tg_id: int, new_nickname: str):
 
 async def migrate_sqlite_if_missing() -> dict:
     return await asyncio.to_thread(_migrate_sync)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# === ЧАТ С АДМИНИСТРАЦИЕЙ (двусторонний, отображается прямо в Mini App) ===
+# Коллекция "chat_messages": каждый документ — одно сообщение треда конкретного
+# игрока. sender: "user" | "admin". Тред пользователя = все сообщения с его userId,
+# отсортированные по createdAt — рендерится в Mini App как обычный чат.
+# ══════════════════════════════════════════════════════════════════════════
+def _add_chat_message_sync(user_id: int, sender: str, text: str, username: str = None, admin_name: str = None) -> str:
+    _ensure_init()
+    if _db is None:
+        raise RuntimeError("Firestore не настроен или недоступен")
+    now_ms = int(time.time() * 1000)
+    data = {
+        "userId": int(user_id),
+        "sender": sender,  # "user" | "admin"
+        "text": text,
+        "username": username,
+        "adminName": admin_name,
+        "createdAt": now_ms,
+        # Для сообщений от игрока — флаг, что админ ещё не увидел/не получил уведомление в боте.
+        "adminNotifiedAt": None if sender == "user" else now_ms,
+    }
+    _, ref = _db.collection("chat_messages").add(data)
+    return ref.id
+
+
+async def add_chat_message(user_id: int, sender: str, text: str, username: str = None, admin_name: str = None) -> str:
+    return await asyncio.to_thread(_add_chat_message_sync, user_id, sender, text, username, admin_name)
+
+
+def _get_pending_chat_messages_sync() -> list:
+    _ensure_init()
+    if _db is None:
+        return []
+    from google.cloud.firestore_v1.base_query import FieldFilter
+    result = []
+    query = (_db.collection("chat_messages")
+             .where(filter=FieldFilter("sender", "==", "user"))
+             .where(filter=FieldFilter("adminNotifiedAt", "==", None)))
+    for doc in query.stream():
+        result.append({"id": doc.id, **(doc.to_dict() or {})})
+    return result
+
+
+async def get_pending_chat_messages() -> list:
+    """Новые сообщения от игроков, о которых ещё не уведомили администрацию в боте."""
+    return await asyncio.to_thread(_get_pending_chat_messages_sync)
+
+
+def _mark_chat_message_notified_sync(message_id: str):
+    _ensure_init()
+    if _db is not None:
+        _db.collection("chat_messages").document(message_id).update({"adminNotifiedAt": int(time.time() * 1000)})
+
+
+async def mark_chat_message_notified(message_id: str):
+    await asyncio.to_thread(_mark_chat_message_notified_sync, message_id)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# === ЗАЯВКИ НА ИГРОВЫЕ ЛИЦЕНЗИИ ===
+# Коллекция "license_requests": заявка игрока на получение лицензии, подаётся
+# из Mini App, обрабатывается администрацией (одобрить/отклонить) через бота.
+# ══════════════════════════════════════════════════════════════════════════
+def _get_pending_license_requests_sync() -> list:
+    _ensure_init()
+    if _db is None:
+        return []
+    from google.cloud.firestore_v1.base_query import FieldFilter
+    result = []
+    query = (_db.collection("license_requests")
+             .where(filter=FieldFilter("status", "==", "pending"))
+             .where(filter=FieldFilter("adminNotifiedAt", "==", None)))
+    for doc in query.stream():
+        result.append({"id": doc.id, **(doc.to_dict() or {})})
+    return result
+
+
+async def get_pending_license_requests() -> list:
+    return await asyncio.to_thread(_get_pending_license_requests_sync)
+
+
+def _mark_license_request_notified_sync(request_id: str):
+    _ensure_init()
+    if _db is not None:
+        _db.collection("license_requests").document(request_id).update({"adminNotifiedAt": int(time.time() * 1000)})
+
+
+async def mark_license_request_notified(request_id: str):
+    await asyncio.to_thread(_mark_license_request_notified_sync, request_id)
+
+
+def _get_license_request_sync(request_id: str) -> dict:
+    _ensure_init()
+    if _db is None:
+        return {}
+    snapshot = _db.collection("license_requests").document(request_id).get()
+    return {"id": snapshot.id, **(snapshot.to_dict() or {})} if snapshot.exists else {}
+
+
+async def get_license_request(request_id: str) -> dict:
+    return await asyncio.to_thread(_get_license_request_sync, request_id)
+
+
+def _resolve_license_request_sync(request_id: str, status: str, admin_comment: str = None) -> dict:
+    _ensure_init()
+    if _db is None:
+        raise RuntimeError("Firestore не настроен или недоступен")
+    ref = _db.collection("license_requests").document(request_id)
+    snapshot = ref.get()
+    data = snapshot.to_dict() or {}
+    if data.get("status") != "pending":
+        return data
+    update = {"status": status, "resolvedAt": int(time.time() * 1000)}
+    if admin_comment:
+        update["adminComment"] = admin_comment
+    ref.update(update)
+    return data
+
+
+async def resolve_license_request(request_id: str, status: str, admin_comment: str = None) -> dict:
+    return await asyncio.to_thread(_resolve_license_request_sync, request_id, status, admin_comment)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# === ТАРИФЫ (управляются из Админ-панели в Mini App, коллекция "tariffs") ===
+# Единый источник правды и для бота, и для Mini App — если коллекция пуста,
+# вызывающий код (main.py) сам подставляет резервные тарифы из config.py.
+# ══════════════════════════════════════════════════════════════════════════
+def _get_tariffs_sync() -> dict:
+    _ensure_init()
+    if _db is None:
+        return {}
+    result = {}
+    for doc in _db.collection("tariffs").stream():
+        data = doc.to_dict() or {}
+        if data.get("active", True):
+            result[doc.id] = {"label": data.get("label", doc.id), "days": int(data.get("days", 0)), "price": int(data.get("price", 0))}
+    return result
+
+
+async def get_tariffs() -> dict:
+    return await asyncio.to_thread(_get_tariffs_sync)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# === ОБЩИЕ НАСТРОЙКИ ПРИЛОЖЕНИЯ (админ-панель → раздел «Настройки») ===
+# ══════════════════════════════════════════════════════════════════════════
+def _get_app_settings_sync() -> dict:
+    _ensure_init()
+    if _db is None:
+        return {}
+    snapshot = _db.collection("app_settings").document("general").get()
+    return snapshot.to_dict() or {} if snapshot.exists else {}
+
+
+async def get_app_settings() -> dict:
+    return await asyncio.to_thread(_get_app_settings_sync)
