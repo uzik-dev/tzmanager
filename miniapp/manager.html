@@ -1,0 +1,2075 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ТЗ Менеджер — Торговая Зона</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&family=Nunito:wght@400;500;600;700&display=swap" rel="stylesheet">
+
+<style>
+/* ─── CSS VARIABLES ─────────────────────────────────────── */
+:root {
+  --bg:         #0a0a0a;
+  --bg-card:    #141414;
+  --bg-card-h:  #1a1a1a;
+  --bg-modal:   #111111;
+  --border:     #222222;
+  --border-h:   #ff7a00;
+  --accent:     #ff7a00;
+  --accent-dim: rgba(255,122,0,.15);
+  --accent-glow:rgba(255,122,0,.35);
+  --green:      #2ecc71;
+  --green-dim:  rgba(46,204,113,.15);
+  --orange:     #f39c12;
+  --orange-dim: rgba(243,156,18,.15);
+  --red:        #e74c3c;
+  --red-dim:    rgba(231,76,60,.15);
+  --blue:       #3498db;
+  --blue-dim:   rgba(52,152,219,.15);
+  --purple:     #9b59b6;
+  --purple-dim: rgba(155,89,182,.15);
+  --text:       #e8e8e8;
+  --text-muted: #666;
+  --text-dim:   #999;
+  --radius:     12px;
+  --radius-sm:  8px;
+  --shadow:     0 4px 24px rgba(0,0,0,.6);
+}
+
+/* ─── RESET & BASE ──────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: 'Nunito', sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  min-height: 100vh;
+  overflow-x: hidden;
+}
+
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background-image:
+    linear-gradient(rgba(255,122,0,.03) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255,122,0,.03) 1px, transparent 1px);
+  background-size: 40px 40px;
+  pointer-events: none;
+  z-index: 0;
+}
+
+/* ─── HEADER ────────────────────────────────────────────── */
+header {
+  position: sticky; top: 0; z-index: 100;
+  background: rgba(10,10,10,.92); backdrop-filter: blur(16px);
+  border-bottom: 1px solid var(--border); padding: 0 24px;
+}
+.header-inner { max-width: 1280px; margin: 0 auto; height: 64px; display: flex; align-items: center; gap: 16px; }
+.logo { display: flex; align-items: center; gap: 12px; text-decoration: none; }
+.logo-icon {
+  width: 36px; height: 36px; background: var(--accent); border-radius: 8px;
+  display: grid; place-items: center; font-family: 'JetBrains Mono', monospace;
+  font-size: 14px; font-weight: 700; color: #000; flex-shrink: 0;
+  box-shadow: 0 0 12px var(--accent-glow);
+}
+.logo-text { font-family: 'Rajdhani', sans-serif; font-size: 22px; font-weight: 700; letter-spacing: 1px; color: var(--text); }
+.logo-text span { color: var(--accent); }
+.header-spacer { flex: 1; }
+.header-stats { display: flex; gap: 16px; align-items: center; }
+.stat-pill {
+  display: flex; align-items: center; gap: 6px;
+  background: var(--bg-card); border: 1px solid var(--border);
+  border-radius: 20px; padding: 5px 12px;
+  font-size: 13px; font-family: 'JetBrains Mono', monospace;
+}
+.stat-pill .dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+.dot-green  { background: var(--green);  box-shadow: 0 0 6px var(--green); }
+.dot-orange { background: var(--orange); box-shadow: 0 0 6px var(--orange); }
+.dot-red    { background: var(--red);    box-shadow: 0 0 6px var(--red); }
+.dot-grey   { background: var(--text-muted); box-shadow: 0 0 6px var(--text-muted); }
+.live-badge { display: flex; align-items: center; gap: 6px; font-size: 11px; font-family: 'JetBrains Mono', monospace; color: var(--green); letter-spacing: .5px; }
+.live-badge.offline { color: var(--red); }
+.live-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); animation: pulse 2s infinite; }
+.live-dot.offline { background: var(--red); animation: none; }
+@keyframes pulse { 0%,100% { opacity: 1; box-shadow: 0 0 0 0 rgba(46,204,113,.4); } 50% { opacity: .7; box-shadow: 0 0 0 5px rgba(46,204,113,0); } }
+
+/* ─── NAV TABS ──────────────────────────────────────────── */
+.nav-tabs {
+  display: flex; gap: 2px; background: rgba(10,10,10,.92); backdrop-filter: blur(16px);
+  border-bottom: 1px solid var(--border); padding: 0 24px; position: sticky; top: 64px; z-index: 99;
+}
+.nav-tab {
+  padding: 12px 20px; font-size: 13px; font-weight: 700; font-family: 'Rajdhani', sans-serif; letter-spacing: .5px;
+  color: var(--text-muted); border: none; background: transparent; cursor: pointer;
+  border-bottom: 2px solid transparent; transition: color .2s, border-color .2s;
+  display: flex; align-items: center; gap: 7px;
+}
+.nav-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+.nav-tab:hover:not(.active) { color: var(--text); }
+.nav-badge { background: var(--red); color: #fff; border-radius: 10px; padding: 1px 6px; font-size: 10px; font-family: 'JetBrains Mono', monospace; }
+
+/* ─── PAGE SYSTEM ───────────────────────────────────────── */
+.page { display: none; }
+.page.active { display: block; }
+
+main { position: relative; z-index: 1; max-width: 1280px; margin: 0 auto; padding: 32px 24px 80px; }
+
+/* ─── TOOLBAR ───────────────────────────────────────────── */
+.toolbar { display: flex; align-items: center; gap: 14px; margin-bottom: 28px; flex-wrap: wrap; }
+.toolbar-title { font-family: 'Rajdhani', sans-serif; font-size: 26px; font-weight: 700; letter-spacing: .5px; }
+.toolbar-spacer { flex: 1; min-width: 8px; }
+.search-wrap { position: relative; }
+.search-wrap svg { position: absolute; left: 12px; top: 50%; transform: translateY(-50%); color: var(--text-muted); pointer-events: none; }
+#searchInput {
+  background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text);
+  font-family: 'Nunito', sans-serif; font-size: 14px; padding: 9px 14px 9px 36px; width: 220px; outline: none;
+  transition: border-color .2s, box-shadow .2s;
+}
+#searchInput:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-dim); }
+#searchInput::placeholder { color: var(--text-muted); }
+
+.sort-select {
+  background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text);
+  font-family: 'Nunito', sans-serif; font-size: 13px; font-weight: 600; padding: 8px 12px; outline: none; cursor: pointer;
+  transition: border-color .2s;
+}
+.sort-select:focus { border-color: var(--accent); }
+.sort-select option { background: var(--bg-card); }
+
+.filter-tabs { display: flex; gap: 4px; background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 4px; }
+.ftab {
+  padding: 6px 14px; border-radius: 6px; font-size: 13px; font-weight: 600; cursor: pointer;
+  border: none; background: transparent; color: var(--text-muted); transition: background .2s, color .2s; white-space: nowrap;
+}
+.ftab.active { background: var(--accent-dim); color: var(--accent); }
+.ftab:hover:not(.active) { color: var(--text); }
+
+.btn-add {
+  display: flex; align-items: center; gap: 8px; background: var(--accent); color: #000;
+  font-family: 'Rajdhani', sans-serif; font-size: 15px; font-weight: 700; letter-spacing: .5px;
+  border: none; border-radius: var(--radius-sm); padding: 9px 20px; cursor: pointer;
+  transition: transform .15s, box-shadow .15s, filter .15s; white-space: nowrap;
+}
+.btn-add:hover { transform: translateY(-2px); box-shadow: 0 6px 20px var(--accent-glow); filter: brightness(1.1); }
+.btn-add:active { transform: translateY(0); }
+
+/* ─── BULK BAR ──────────────────────────────────────────── */
+#bulkBar {
+  display: none; align-items: center; gap: 12px; background: var(--accent-dim); border: 1px solid rgba(255,122,0,.4);
+  border-radius: var(--radius-sm); padding: 10px 18px; margin-bottom: 20px; flex-wrap: wrap;
+}
+#bulkBar.show { display: flex; }
+.bulk-count { font-weight: 700; color: var(--accent); font-family: 'JetBrains Mono', monospace; }
+.btn-bulk {
+  padding: 7px 14px; border-radius: 6px; font-size: 13px; font-weight: 700; cursor: pointer;
+  border: 1px solid var(--border); background: var(--bg-card); color: var(--text); transition: all .2s;
+  display: flex; align-items: center; gap: 6px;
+}
+.btn-bulk:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-dim); }
+.btn-bulk.grey:hover { border-color: var(--text-muted); color: var(--text); background: var(--bg-card-h); }
+.btn-bulk-close { margin-left: auto; background: transparent; border: none; color: var(--text-muted); font-size: 20px; cursor: pointer; line-height: 1; }
+.btn-bulk-close:hover { color: var(--text); }
+
+/* ─── CARD GRID (фикс. 20 палаток, 4×5) ─────────────────── */
+#grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 16px; }
+@media (max-width: 1100px) { #grid { grid-template-columns: repeat(4, 1fr); } }
+@media (max-width: 860px)  { #grid { grid-template-columns: repeat(2, 1fr); } }
+@media (max-width: 480px)  { #grid { grid-template-columns: 1fr; } }
+
+/* ─── TENT CARD ─────────────────────────────────────────── */
+.card {
+  background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius); padding: 18px;
+  cursor: default; transition: transform .2s, border-color .2s, box-shadow .2s;
+  animation: cardIn .35s ease both; position: relative; overflow: hidden; user-select: none;
+}
+.card::before { content: ''; position: absolute; top: 0; left: 0; right: 0; height: 2px; background: var(--status-color, var(--border)); }
+.card-label-bar { position: absolute; left: 0; top: 0; bottom: 0; width: 3px; border-radius: var(--radius) 0 0 var(--radius); }
+.card:hover { transform: translateY(-4px); border-color: var(--status-color, var(--accent)); box-shadow: 0 8px 32px rgba(0,0,0,.5), 0 0 0 1px var(--status-color, var(--accent)); }
+.card.vacant { border-style: dashed; }
+.card.vacant:hover { border-style: solid; }
+.card.select-mode { cursor: pointer; }
+.card.selected { border-color: var(--accent) !important; box-shadow: 0 0 0 2px var(--accent); background: rgba(255,122,0,.04); }
+.card-check {
+  position: absolute; top: 12px; right: 12px; width: 20px; height: 20px; border-radius: 50%;
+  border: 2px solid var(--border); background: var(--bg); display: none; align-items: center; justify-content: center;
+  font-size: 10px; transition: all .2s;
+}
+.select-mode .card-check { display: flex; }
+.selected .card-check { background: var(--accent); border-color: var(--accent); color: #000; }
+
+@keyframes cardIn { from { opacity: 0; transform: translateY(16px); } to { opacity: 1; transform: translateY(0); } }
+
+.card-header { display: flex; align-items: flex-start; justify-content: space-between; margin-bottom: 12px; gap: 8px; }
+.tent-num { font-family: 'JetBrains Mono', monospace; font-size: 11px; font-weight: 700; letter-spacing: 2px; color: var(--text-muted); text-transform: uppercase; margin-bottom: 4px; }
+.player-name { font-family: 'Rajdhani', sans-serif; font-size: 19px; font-weight: 700; letter-spacing: .5px; line-height: 1.1; word-break: break-word; }
+.label-chip { display: inline-flex; align-items: center; gap: 4px; padding: 2px 7px; border-radius: 4px; font-size: 10px; font-weight: 700; letter-spacing: .5px; text-transform: uppercase; }
+.chip-row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.paid-chip {
+  display: inline-flex; align-items: center; gap: 4px; padding: 2px 7px; border-radius: 4px;
+  font-size: 10px; font-weight: 700; letter-spacing: .3px; background: var(--green-dim); color: var(--green);
+  border: 1px solid rgba(46,204,113,.3); white-space: nowrap;
+}
+.status-badge {
+  display: flex; align-items: center; gap: 5px; border-radius: 20px; padding: 4px 10px;
+  font-size: 10.5px; font-weight: 700; letter-spacing: .5px; text-transform: uppercase; white-space: nowrap; flex-shrink: 0;
+}
+.status-paid    { background: var(--green-dim);  color: var(--green); }
+.status-soon    { background: var(--orange-dim); color: var(--orange); }
+.status-expired { background: var(--red-dim);    color: var(--red); }
+.status-free    { background: var(--bg-card-h);  color: var(--text-muted); border: 1px solid var(--border); }
+
+.card-divider { height: 1px; background: var(--border); margin: 10px 0; }
+.card-meta { display: flex; flex-direction: column; gap: 7px; }
+.meta-row { display: flex; align-items: center; justify-content: space-between; font-size: 12.5px; gap: 8px; }
+.meta-label { color: var(--text-muted); display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+.meta-value { font-family: 'JetBrains Mono', monospace; font-size: 12px; font-weight: 500; color: var(--text-dim); text-align: right; }
+.meta-value.highlight { color: var(--text); }
+.countdown { font-family: 'JetBrains Mono', monospace; font-size: 11.5px; padding: 3px 8px; border-radius: 4px; white-space: nowrap; }
+
+/* ─── VACANT CARD BODY ──────────────────────────────────── */
+.vacant-body { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; padding: 22px 0 18px; color: var(--text-muted); }
+.vacant-label { font-family: 'Rajdhani', sans-serif; font-size: 15px; font-weight: 700; letter-spacing: 1.5px; text-transform: uppercase; }
+.vacant-hist-hint { font-size: 10.5px; color: var(--text-muted); text-align: center; }
+
+.card-actions { display: flex; flex-direction: column; gap: 8px; margin-top: 14px; }
+.btn-renew-primary {
+  width: 100%; padding: 9px; border-radius: var(--radius-sm);
+  border: 1px solid rgba(46,204,113,.35); background: var(--green-dim); color: var(--green);
+  font-family: 'Nunito', sans-serif; font-size: 13px; font-weight: 700; cursor: pointer;
+  display: flex; align-items: center; justify-content: center; gap: 7px; transition: all .2s;
+}
+.btn-renew-primary:hover { background: var(--green); color: #04150a; box-shadow: 0 4px 16px rgba(46,204,113,.3); transform: translateY(-1px); }
+.card-actions-row { display: flex; gap: 8px; }
+.btn-icon {
+  flex: 1; padding: 8px; border-radius: var(--radius-sm); border: 1px solid var(--border); background: transparent;
+  color: var(--text-muted); cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 6px;
+  transition: all .2s; font-size: 12px;
+}
+.btn-icon:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-dim); }
+.btn-icon.release:hover { border-color: var(--orange); color: var(--orange); background: var(--orange-dim); }
+
+/* ─── EMPTY STATE ───────────────────────────────────────── */
+#emptyState { grid-column: 1/-1; text-align: center; padding: 80px 20px; color: var(--text-muted); display: none; }
+#emptyState svg { opacity: .3; margin-bottom: 16px; }
+#emptyState h3 { font-family: 'Rajdhani', sans-serif; font-size: 22px; margin-bottom: 8px; color: var(--text-dim); }
+
+/* ─── REVENUE BANNER ────────────────────────────────────── */
+.revenue-banner {
+  display: flex; align-items: center; gap: 20px; background: var(--bg-card); border: 1px solid var(--border);
+  border-left: 3px solid var(--accent); border-radius: var(--radius); padding: 18px 24px; margin-bottom: 24px;
+  position: relative; overflow: hidden; flex-wrap: wrap;
+}
+.revenue-banner::after {
+  content: ''; position: absolute; right: -30px; top: -30px; width: 120px; height: 120px;
+  background: radial-gradient(circle, var(--accent-dim) 0%, transparent 70%); pointer-events: none;
+}
+.revenue-icon {
+  width: 44px; height: 44px; background: var(--accent-dim); border: 1px solid rgba(255,122,0,.3);
+  border-radius: 10px; display: grid; place-items: center; color: var(--accent); flex-shrink: 0;
+}
+.revenue-label { font-size: 11px; font-weight: 700; letter-spacing: 1px; text-transform: uppercase; color: var(--text-muted); margin-bottom: 4px; }
+.revenue-amount { font-family: 'JetBrains Mono', monospace; font-size: 28px; font-weight: 700; color: var(--accent); line-height: 1; transition: all .4s ease; }
+.revenue-amount .currency { font-size: 16px; opacity: .7; margin-right: 2px; }
+.revenue-divider { width: 1px; height: 40px; background: var(--border); flex-shrink: 0; }
+.revenue-sub { display: flex; flex-direction: column; gap: 4px; }
+.revenue-sub-item { font-size: 12px; color: var(--text-muted); font-family: 'JetBrains Mono', monospace; display: flex; align-items: center; gap: 6px; }
+.revenue-sub-item span { color: var(--text-dim); }
+
+/* ─── STATS PAGE ────────────────────────────────────────── */
+.stats-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 14px; margin-bottom: 28px; }
+.stat-card { background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px; position: relative; overflow: hidden; }
+.stat-card::before { content: ''; position: absolute; top: 0; left: 0; right: 0; height: 2px; background: var(--c, var(--accent)); }
+.stat-card-label { font-size: 11px; font-weight: 700; letter-spacing: 1px; text-transform: uppercase; color: var(--text-muted); margin-bottom: 8px; }
+.stat-card-value { font-family: 'JetBrains Mono', monospace; font-size: 24px; font-weight: 700; color: var(--text); line-height: 1; }
+.stat-card-sub { font-size: 12px; color: var(--text-muted); margin-top: 6px; }
+.stat-card-trend { position: absolute; top: 14px; right: 14px; font-size: 12px; font-weight: 700; padding: 2px 8px; border-radius: 4px; }
+.trend-up   { background: var(--green-dim); color: var(--green); }
+.trend-down { background: var(--red-dim);   color: var(--red); }
+
+.section-title { font-family: 'Rajdhani', sans-serif; font-size: 17px; font-weight: 700; color: var(--text-dim); margin-bottom: 14px; display: flex; align-items: center; gap: 8px; }
+.section-title::after { content: ''; flex: 1; height: 1px; background: var(--border); }
+
+.chart-wrap { background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius); padding: 24px; margin-bottom: 24px; }
+.bar-chart { display: flex; align-items: flex-end; gap: 10px; height: 130px; }
+.bar-col { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 6px; height: 100%; justify-content: flex-end; }
+.bar {
+  width: 100%; border-radius: 4px 4px 0 0; min-height: 3px; background: var(--accent-dim); border: 1px solid rgba(255,122,0,.25);
+  transition: height .6s cubic-bezier(.34,1.56,.64,1); position: relative; cursor: default;
+}
+.bar.cur { background: var(--accent); border-color: var(--accent); box-shadow: 0 0 10px var(--accent-glow); }
+.bar-tip {
+  position: absolute; bottom: 100%; left: 50%; transform: translateX(-50%); background: var(--bg-modal); border: 1px solid var(--border);
+  border-radius: 6px; padding: 5px 9px; font-size: 11px; white-space: nowrap; opacity: 0; transition: opacity .15s;
+  pointer-events: none; margin-bottom: 4px; font-family: 'JetBrains Mono', monospace; z-index: 5;
+}
+.bar:hover .bar-tip { opacity: 1; }
+.bar-lbl { font-size: 10px; color: var(--text-muted); font-family: 'JetBrains Mono', monospace; }
+
+.two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+
+.top-list { display: flex; flex-direction: column; gap: 8px; }
+.top-item { display: flex; align-items: center; gap: 10px; background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 10px 14px; }
+.top-rank { font-family: 'JetBrains Mono', monospace; font-size: 14px; font-weight: 700; width: 22px; text-align: center; color: var(--text-muted); }
+.r1 { color: #ffd700; } .r2 { color: #c0c0c0; } .r3 { color: #cd7f32; }
+.top-name { flex: 1; font-weight: 700; font-size: 14px; }
+.top-val { font-family: 'JetBrains Mono', monospace; font-size: 13px; color: var(--accent); }
+
+/* ─── HISTORY PAGE ──────────────────────────────────────── */
+.hist-list { display: flex; flex-direction: column; gap: 8px; }
+.hist-item { display: flex; align-items: flex-start; gap: 12px; background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 12px 14px; }
+.hist-ico { width: 30px; height: 30px; border-radius: 50%; display: grid; place-items: center; flex-shrink: 0; font-size: 13px; }
+.hist-ico.add     { background: var(--green-dim);  color: var(--green); }
+.hist-ico.edit    { background: var(--accent-dim); color: var(--accent); }
+.hist-ico.release { background: var(--bg-card-h);  color: var(--text-muted); }
+.hist-ico.bulk    { background: var(--blue-dim);   color: var(--blue); }
+.hist-ico.renew   { background: var(--purple-dim); color: var(--purple); }
+.hist-body { flex: 1; }
+.hist-title { font-size: 13px; font-weight: 700; }
+.hist-time  { font-size: 11px; color: var(--text-muted); font-family: 'JetBrains Mono', monospace; margin-top: 2px; }
+.hist-detail { font-size: 12px; color: var(--text-dim); margin-top: 3px; }
+
+.period-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 18px; }
+.period-chip {
+  padding: 7px 14px; border-radius: 20px; border: 1px solid var(--border); background: var(--bg-card); color: var(--text-muted);
+  font-family: 'Nunito', sans-serif; font-size: 12.5px; font-weight: 700; cursor: pointer; transition: all .2s; white-space: nowrap;
+}
+.period-chip:hover { border-color: var(--accent); color: var(--accent); }
+.period-chip.active { background: var(--accent); border-color: var(--accent); color: #1a0d00; }
+.period-custom { display: flex; align-items: center; gap: 6px; margin-left: 4px; }
+.period-custom input[type="date"] {
+  background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius-sm);
+  padding: 6px 10px; color: var(--text); font-family: 'Nunito', sans-serif; font-size: 12.5px; color-scheme: dark;
+}
+.period-custom span { color: var(--text-muted); font-size: 12px; }
+
+/* ─── PAYMENTS TABLE ────────────────────────────────────── */
+.pay-table-wrap { background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius); overflow: auto; max-height: 640px; }
+.pay-table { width: 100%; border-collapse: collapse; font-size: 13px; white-space: nowrap; }
+.pay-table thead th {
+  position: sticky; top: 0; z-index: 2; background: var(--bg-card-h); text-align: left; padding: 12px 14px;
+  font-size: 11px; font-weight: 700; letter-spacing: .5px; text-transform: uppercase; color: var(--text-muted); border-bottom: 1px solid var(--border);
+}
+.pay-table tbody td { padding: 11px 14px; border-bottom: 1px solid var(--border); color: var(--text-dim); }
+.pay-table tbody tr:last-child td { border-bottom: none; }
+.pay-table tbody tr:hover { background: var(--bg-card-h); }
+.pay-table .pay-player { color: var(--text); font-weight: 700; white-space: normal; }
+.pay-table .pay-amount { font-family: 'JetBrains Mono', monospace; color: var(--accent); font-weight: 700; }
+.pay-table .pay-note { color: var(--text-muted); white-space: normal; max-width: 220px; }
+.pay-type-chip { padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 700; }
+@media (max-width: 640px) { .pay-table { font-size: 12px; } .pay-table thead th, .pay-table tbody td { padding: 8px 10px; } }
+
+/* ─── MODAL ─────────────────────────────────────────────── */
+.modal-backdrop {
+  position: fixed; inset: 0; background: rgba(0,0,0,.7); backdrop-filter: blur(6px);
+  z-index: 200; display: flex; align-items: center; justify-content: center;
+  padding: 20px; opacity: 0; pointer-events: none; transition: opacity .2s;
+}
+.modal-backdrop.open { opacity: 1; pointer-events: all; }
+.modal {
+  background: var(--bg-modal); border: 1px solid var(--border); border-radius: var(--radius); padding: 28px;
+  width: 100%; max-width: 460px; max-height: 90vh; overflow-y: auto; box-shadow: var(--shadow);
+  transform: scale(.95) translateY(10px); transition: transform .2s;
+}
+.modal-backdrop.open .modal { transform: scale(1) translateY(0); }
+.modal.wide { max-width: 560px; }
+.modal-title { font-family: 'Rajdhani', sans-serif; font-size: 22px; font-weight: 700; margin-bottom: 20px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.modal-title svg { color: var(--accent); }
+.form-group { margin-bottom: 16px; }
+.form-label { display: block; font-size: 12px; font-weight: 700; letter-spacing: .5px; text-transform: uppercase; color: var(--text-muted); margin-bottom: 6px; }
+.form-input {
+  width: 100%; background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text);
+  font-family: 'Nunito', sans-serif; font-size: 15px; padding: 10px 14px; outline: none; transition: border-color .2s, box-shadow .2s;
+}
+.form-input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-dim); }
+.form-input:disabled { opacity: .55; cursor: not-allowed; }
+.form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.days-presets { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
+.day-preset {
+  padding: 4px 10px; border-radius: 4px; border: 1px solid var(--border); background: transparent; color: var(--text-muted);
+  font-size: 12px; font-weight: 600; cursor: pointer; transition: all .15s;
+}
+.day-preset:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-dim); }
+.modal-actions { display: flex; gap: 10px; margin-top: 24px; }
+.btn-cancel {
+  flex: 1; padding: 11px; border-radius: var(--radius-sm); border: 1px solid var(--border); background: transparent;
+  color: var(--text-muted); font-family: 'Nunito', sans-serif; font-size: 15px; font-weight: 700; cursor: pointer; transition: all .2s;
+}
+.btn-cancel:hover { border-color: var(--text-muted); color: var(--text); }
+.btn-submit {
+  flex: 2; padding: 11px; border-radius: var(--radius-sm); border: none; background: var(--accent); color: #000;
+  font-family: 'Rajdhani', sans-serif; font-size: 16px; font-weight: 700; letter-spacing: .5px; cursor: pointer;
+  transition: filter .2s, box-shadow .2s, transform .15s;
+}
+.btn-submit:hover { filter: brightness(1.1); box-shadow: 0 4px 16px var(--accent-glow); transform: translateY(-1px); }
+.btn-submit:disabled { opacity: .5; cursor: not-allowed; filter: none; box-shadow: none; transform: none; }
+
+/* ─── TARIFF PRESETS ─────────────────────────────────────── */
+.tariff-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; margin-top: 6px; }
+.tariff-btn {
+  display: flex; flex-direction: column; align-items: center; gap: 2px;
+  background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius-sm);
+  padding: 10px 6px; cursor: pointer; transition: all .15s; color: var(--text-dim); position: relative;
+}
+.tariff-btn:hover { border-color: var(--accent); background: var(--accent-dim); }
+.tariff-btn.active { border-color: var(--accent); background: var(--accent-dim); box-shadow: 0 0 0 1px var(--accent); }
+.tariff-btn.hot { border-color: rgba(255,122,0,.4); }
+.tariff-btn .tariff-period { font-family: 'Rajdhani', sans-serif; font-size: 13.5px; font-weight: 700; color: var(--text); }
+.tariff-btn .tariff-days { font-size: 10.5px; color: var(--text-muted); }
+.tariff-btn .tariff-price { font-family: 'JetBrains Mono', monospace; font-size: 13px; font-weight: 700; color: var(--accent); margin-top: 2px; }
+.tariff-btn .tariff-save { font-size: 9.5px; color: var(--green); }
+.calc-preview {
+  background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius-sm);
+  padding: 10px 14px; font-size: 13px; color: var(--text-dim); margin-bottom: 16px;
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+}
+.calc-preview .val { font-family: 'JetBrains Mono', monospace; font-weight: 700; color: var(--text); }
+.renew-current-info {
+  background: var(--bg-card-h); border: 1px solid var(--border); border-radius: var(--radius-sm);
+  padding: 10px 14px; font-size: 12.5px; color: var(--text-dim); margin-bottom: 18px;
+}
+.renew-current-info b { color: var(--text); }
+
+/* ─── LABEL PICKER ──────────────────────────────────────── */
+.lbl-picker { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 4px; }
+.lbl-opt {
+  width: 26px; height: 26px; border-radius: 50%; cursor: pointer; border: 2px solid transparent;
+  transition: transform .15s, border-color .15s; display: grid; place-items: center; font-size: 11px;
+}
+.lbl-opt:hover { transform: scale(1.15); }
+.lbl-opt.on { border-color: #fff; transform: scale(1.1); }
+.lbl-opt.none { background: var(--bg-card-h); border: 2px dashed var(--border); color: var(--text-muted); }
+
+/* ─── BULK LIST ─────────────────────────────────────────── */
+.bulk-list { max-height: 240px; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; margin-bottom: 16px; }
+.bulk-item { display: flex; align-items: center; gap: 10px; background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 8px 12px; font-size: 13px; }
+
+/* ─── ALERT MODAL ───────────────────────────────────────── */
+.alert-list { display: flex; flex-direction: column; gap: 10px; margin-bottom: 20px; }
+.alert-item { display: flex; align-items: center; gap: 12px; border-radius: var(--radius-sm); padding: 12px 14px; }
+.alert-item.warn { background: var(--orange-dim); border: 1px solid rgba(243,156,18,.3); }
+.alert-item.err  { background: var(--red-dim);    border: 1px solid rgba(231,76,60,.3); }
+.alert-item-body { flex: 1; }
+.alert-item-name { font-weight: 700; font-size: 14px; }
+.alert-item-sub  { font-size: 12px; color: var(--text-muted); margin-top: 2px; }
+
+/* ─── TOAST ─────────────────────────────────────────────── */
+#toast { position: fixed; bottom: 24px; right: 24px; z-index: 999; display: flex; flex-direction: column; gap: 8px; }
+.toast-item {
+  background: var(--bg-card); border: 1px solid var(--border); border-left: 3px solid var(--accent); border-radius: var(--radius-sm);
+  padding: 12px 16px; font-size: 13px; font-weight: 600; box-shadow: var(--shadow); animation: slideIn .3s ease; max-width: 320px;
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+}
+.toast-action {
+  flex-shrink: 0; background: var(--accent); color: #000; border: none; border-radius: 6px; padding: 5px 12px;
+  font-size: 12px; font-weight: 700; cursor: pointer; font-family: 'Nunito', sans-serif; transition: filter .15s;
+}
+.toast-action:hover { filter: brightness(1.1); }
+.toast-item.success { border-left-color: var(--green); }
+.toast-item.error   { border-left-color: var(--red); }
+@keyframes slideIn { from { opacity: 0; transform: translateX(20px); } to { opacity: 1; transform: translateX(0); } }
+
+/* ─── LOADER ─────────────────────────────────────────────── */
+#loader { position: fixed; inset: 0; background: var(--bg); z-index: 999; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px; transition: opacity .5s; }
+#loader.hidden { opacity: 0; pointer-events: none; }
+.loader-logo { font-family: 'Rajdhani', sans-serif; font-size: 36px; font-weight: 700; letter-spacing: 2px; color: var(--accent); }
+.loader-bar { width: 180px; height: 3px; background: var(--border); border-radius: 99px; overflow: hidden; }
+.loader-bar-fill { height: 100%; width: 0; background: var(--accent); border-radius: 99px; animation: loadFill 1.2s ease forwards; }
+@keyframes loadFill { to { width: 100%; } }
+
+.confirm-msg { color: var(--text-dim); font-size: 14px; margin-bottom: 20px; line-height: 1.5; }
+.confirm-msg strong { color: var(--text); }
+
+/* ─── RESPONSIVE ─────────────────────────────────────────── */
+@media (max-width: 640px) {
+  header { padding: 0 16px; }
+  .header-stats { display: none; }
+  .nav-tabs { padding: 0 16px; overflow-x: auto; }
+  main { padding: 20px 16px 60px; }
+  .toolbar { gap: 10px; }
+  .toolbar-title { font-size: 20px; }
+  #searchInput { width: 100%; }
+  .search-wrap { width: 100%; }
+  .filter-tabs { overflow-x: auto; }
+  .btn-add span { display: none; }
+  .form-row { grid-template-columns: 1fr; }
+  #toast { left: 16px; right: 16px; }
+  .toast-item { max-width: 100%; }
+  .revenue-banner { flex-wrap: wrap; gap: 12px; }
+  .revenue-amount { font-size: 22px; }
+  .revenue-divider { display: none; }
+  .two-col { grid-template-columns: 1fr; }
+}
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: var(--bg); }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
+</style>
+</head>
+<body>
+
+<!-- LOADER -->
+<div id="loader">
+  <div class="loader-logo">ТЗ</div>
+  <div style="color:var(--text-muted);font-size:13px;letter-spacing:1px">ЗАГРУЗКА СИСТЕМЫ</div>
+  <div class="loader-bar"><div class="loader-bar-fill"></div></div>
+</div>
+
+<!-- HEADER -->
+<header>
+  <div class="header-inner">
+    <a class="logo" href="#">
+      <div class="logo-icon">ТЗ</div>
+      <div class="logo-text">ТОРГ<span>ЗОНА</span></div>
+    </a>
+    <div class="header-spacer"></div>
+    <div class="header-stats">
+      <div class="stat-pill"><span class="dot dot-green"></span><span id="statPaid">0</span> занято</div>
+      <div class="stat-pill"><span class="dot dot-orange"></span><span id="statSoon">0</span> скоро</div>
+      <div class="stat-pill"><span class="dot dot-red"></span><span id="statExpired">0</span> просрочено</div>
+      <div class="stat-pill"><span class="dot dot-grey"></span><span id="statFree">0</span> свободно</div>
+    </div>
+    <div class="live-badge" id="dbStatusBadge"><div class="live-dot" id="dbStatusDot"></div><span id="dbStatusText">Подключение…</span></div>
+    <button class="btn-cancel" id="migrateBtn" style="display:none;margin-left:10px">🗄 Есть локальные данные</button>
+  </div>
+</header>
+<div id="offlineBanner" style="display:none;background:#3a1414;border-bottom:1px solid var(--red);color:#ff9a90;padding:10px 24px;font-size:13px;font-weight:600;text-align:center">
+  ⚠️ Нет связи с общей базой (Firebase). Все изменения сохраняются ТОЛЬКО в этом браузере и не попадут ни в Telegram-приложение, ни в Google-таблицу, пока связь не восстановится. Проверьте интернет и обновите страницу.
+</div>
+
+<!-- NAV TABS -->
+<div class="nav-tabs">
+  <button class="nav-tab active" data-page="tents">
+    🏕️ Палатки
+    <span class="nav-badge" id="alertBadge" style="display:none"></span>
+  </button>
+  <button class="nav-tab" data-page="stats">📊 Статистика</button>
+  <button class="nav-tab" data-page="payments">🧾 Отчёты</button>
+  <button class="nav-tab" data-page="history">📋 История</button>
+</div>
+
+<main>
+
+  <!-- ══ PAGE: ПАЛАТКИ ══ -->
+  <div class="page active" id="page-tents">
+
+    <div class="revenue-banner">
+      <div class="revenue-icon">
+        <svg width="22" height="22" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M12 6v12m-3-2.818l.879.659c1.171.879 3.07.879 4.242 0 1.172-.879 1.172-2.303 0-3.182C13.536 12.219 12.768 12 12 12c-.725 0-1.45-.22-2.003-.659-1.106-.879-1.106-2.303 0-3.182s2.9-.879 4.006 0l.415.33M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+        </svg>
+      </div>
+      <div>
+        <div class="revenue-label">Суммарный доход</div>
+        <div class="revenue-amount"><span class="currency">🛢</span><span id="revenueTotalNum">0</span></div>
+      </div>
+      <div class="revenue-divider"></div>
+      <div class="revenue-sub">
+        <div class="revenue-sub-item">Занято: <span id="revenueCount">0</span> / 20</div>
+        <div class="revenue-sub-item">Средний платёж: <span id="revenueAvg">—</span></div>
+      </div>
+      <div class="revenue-divider"></div>
+      <div class="revenue-sub">
+        <div class="revenue-sub-item">Этот месяц: <span id="revenueMonth" style="color:var(--green)">—</span></div>
+        <div class="revenue-sub-item">Прошлый месяц: <span id="revenuePrev">—</span></div>
+      </div>
+    </div>
+
+    <div class="toolbar">
+      <div class="toolbar-title" id="tentsToolbarTitle">Палатки (0/20)</div>
+      <div class="toolbar-spacer"></div>
+      <div class="search-wrap">
+        <svg width="15" height="15" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+        <input id="searchInput" type="text" placeholder="Поиск по нику или номеру...">
+      </div>
+      <select class="sort-select" id="sortSelect">
+        <option value="num">По номеру</option>
+        <option value="player">По нику</option>
+        <option value="date">По дате</option>
+        <option value="amount">По сумме</option>
+        <option value="status">По статусу</option>
+      </select>
+      <div class="filter-tabs">
+        <button class="ftab active" data-filter="all">Все</button>
+        <button class="ftab" data-filter="paid">🟢 Занято</button>
+        <button class="ftab" data-filter="soon">🟡 Скоро</button>
+        <button class="ftab" data-filter="expired">🔴 Просрочено</button>
+        <button class="ftab" data-filter="free">⚪ Свободно</button>
+        <button class="ftab" data-filter="paidThisMonth">💰 Платили в этом мес.</button>
+      </div>
+      <button class="btn-add" id="btnSelectMode" style="background:var(--bg-card);color:var(--text-muted);border:1px solid var(--border);">
+        <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+        <span>Выбрать</span>
+      </button>
+    </div>
+
+    <div id="bulkBar">
+      <span style="color:var(--text-muted);font-size:13px">Выбрано:</span>
+      <span class="bulk-count" id="bulkCount">0</span>
+      <button class="btn-bulk" id="btnBulkExtend">🔄 Продлить</button>
+      <button class="btn-bulk grey" id="btnBulkRelease">🏁 Освободить</button>
+      <button class="btn-bulk-close" id="btnExitSelect">✕</button>
+    </div>
+
+    <div id="grid">
+      <div id="emptyState">
+        <svg width="48" height="48" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+        <h3>Ничего не найдено</h3>
+        <p>Попробуйте изменить поиск или сбросить фильтр</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- ══ PAGE: СТАТИСТИКА ══ -->
+  <div class="page" id="page-stats">
+    <div class="toolbar">
+      <div class="toolbar-title">Статистика</div>
+      <div class="toolbar-spacer"></div>
+      <button class="btn-add" id="btnExportCsv" style="background:var(--bg-card);color:var(--text-muted);border:1px solid var(--border);">
+        <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3"/></svg>
+        <span>Экспорт CSV</span>
+      </button>
+    </div>
+    <div class="stats-grid" id="statsCards"></div>
+    <div class="section-title">📈 Доход по месяцам</div>
+    <div class="chart-wrap"><div class="bar-chart" id="barChart"></div></div>
+    <div class="two-col">
+      <div>
+        <div class="section-title">🏆 Топ-5 плательщиков</div>
+        <div class="top-list" id="topList"></div>
+      </div>
+      <div>
+        <div class="section-title">🏷️ По меткам</div>
+        <div class="top-list" id="lblStatList"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ══ PAGE: ОТЧЁТЫ (платежи + генератор для Discord) ══ -->
+  <div class="page" id="page-payments">
+    <div class="toolbar">
+      <div class="toolbar-title">Отчёты</div>
+      <div class="toolbar-spacer"></div>
+      <div class="search-wrap">
+        <svg width="15" height="15" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+        <input id="paySearchInput" type="text" placeholder="Поиск по нику или номеру...">
+      </div>
+      <button class="btn-add" id="btnCopyReport" style="background:var(--accent-dim);color:var(--accent);border:1px solid rgba(255,138,61,.35);">
+        <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
+        <span>Скопировать отчёт</span>
+      </button>
+      <button class="btn-add" id="btnDiscordReport" style="background:#5865F2;color:#fff;">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M20.317 4.37a19.79 19.79 0 00-4.885-1.515.074.074 0 00-.079.037c-.21.375-.444.864-.608 1.25a18.27 18.27 0 00-5.487 0 12.64 12.64 0 00-.617-1.25.077.077 0 00-.079-.037A19.736 19.736 0 003.677 4.37a.07.07 0 00-.032.027C.533 9.046-.32 13.58.099 18.057a.082.082 0 00.031.057 19.9 19.9 0 005.993 3.03.078.078 0 00.084-.028c.462-.63.874-1.295 1.226-1.994a.076.076 0 00-.041-.106 13.107 13.107 0 01-1.872-.892.077.077 0 01-.008-.128c.126-.094.252-.192.372-.291a.074.074 0 01.077-.01c3.928 1.793 8.18 1.793 12.062 0a.074.074 0 01.078.01c.12.099.246.197.373.291a.077.077 0 01-.006.128c-.598.35-1.22.645-1.873.892a.076.076 0 00-.04.107c.36.698.772 1.362 1.225 1.993a.076.076 0 00.084.028 19.839 19.839 0 006.002-3.03.077.077 0 00.032-.057c.5-5.177-.838-9.674-3.549-13.66a.061.061 0 00-.031-.028zM8.02 15.33c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.955-2.419 2.157-2.419 1.21 0 2.176 1.096 2.157 2.42 0 1.333-.955 2.418-2.157 2.418zm7.975 0c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.955-2.419 2.157-2.419 1.21 0 2.176 1.096 2.157 2.42 0 1.333-.946 2.418-2.157 2.418z"/></svg>
+        <span>Discord-отчёт</span>
+      </button>
+      <button class="btn-add" id="btnExportPaymentsCsv" style="background:var(--bg-card);color:var(--text-muted);border:1px solid var(--border);">
+        <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3"/></svg>
+        <span>Экспорт CSV</span>
+      </button>
+    </div>
+    <div class="period-bar">
+      <button class="period-chip" data-range="today">Сегодня</button>
+      <button class="period-chip active" data-range="week">Эта неделя</button>
+      <button class="period-chip" data-range="lastWeek">Прошлая неделя</button>
+      <button class="period-chip" data-range="month">Этот месяц</button>
+      <button class="period-chip" data-range="lastMonth">Прошлый месяц</button>
+      <button class="period-chip" data-range="all">Всё время</button>
+      <div class="period-custom">
+        <input type="date" id="payFrom" title="С даты">
+        <span>—</span>
+        <input type="date" id="payTo" title="По дату">
+      </div>
+    </div>
+    <div class="revenue-banner" style="margin-bottom:20px">
+      <div class="revenue-icon">
+        <svg width="22" height="22" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12h3.75M9 15h3.75M9 18h3.75m3-15H5.25A2.25 2.25 0 003 5.25v13.5A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V5.25A2.25 2.25 0 0018.75 3zM9 3v18"/></svg>
+      </div>
+      <div>
+        <div class="revenue-label" id="paymentsPeriodLabel">Сумма за период</div>
+        <div class="revenue-amount"><span class="currency">🛢</span><span id="paymentsTotal">0</span></div>
+      </div>
+      <div class="revenue-divider"></div>
+      <div class="revenue-sub">
+        <div class="revenue-sub-item">Записей: <span id="paymentsCount">0</span></div>
+        <div class="revenue-sub-item">Игроков: <span id="paymentsPlayers">0</span></div>
+      </div>
+    </div>
+    <div class="pay-table-wrap">
+      <table class="pay-table">
+        <thead>
+          <tr><th>Дата</th><th>Игрок</th><th>Палатка</th><th>Тип</th><th>Сумма</th><th>Продлено до</th><th>Заметка</th></tr>
+        </thead>
+        <tbody id="paymentsBody"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- ══ PAGE: ИСТОРИЯ ══ -->
+  <div class="page" id="page-history">
+    <div class="toolbar">
+      <div class="toolbar-title">История изменений</div>
+      <div class="toolbar-spacer"></div>
+      <button class="btn-bulk grey" id="btnClearHist" style="padding:8px 16px">🗑 Очистить историю</button>
+    </div>
+    <div class="hist-list" id="histList">
+      <div style="text-align:center;padding:60px;color:var(--text-muted)">История пуста</div>
+    </div>
+  </div>
+
+</main>
+
+<!-- MODAL: ПЕРЕНОС ЛОКАЛЬНЫХ ДАННЫХ -->
+<div class="modal-backdrop" id="migrateModal">
+  <div class="modal" style="max-width:640px">
+    <div class="modal-title">🗄 Перенос локальных данных в общую базу</div>
+    <div style="font-size:12.5px;color:var(--text-dim);line-height:1.5;margin-bottom:14px">
+      Ниже — палатки, найденные в локальном хранилище этого браузера (накопились, пока не было связи с Firebase).
+      Отметьте, что перенести. <b style="color:var(--orange)">Палатки с пометкой «конфликт»</b> уже заняты в общей базе другими данными — выберите вручную, что оставить.
+    </div>
+    <div id="migrateList" style="max-height:50vh;overflow-y:auto;display:flex;flex-direction:column;gap:8px"></div>
+    <div class="modal-actions" style="margin-top:16px">
+      <button class="btn-cancel" id="migrateCancel">Закрыть</button>
+      <button class="btn-submit" id="migrateApply">Перенести отмеченные</button>
+    </div>
+  </div>
+</div>
+
+<!-- MODAL: ЗАНЯТЬ ПАЛАТКУ -->
+<div class="modal-backdrop" id="occupyModal">
+  <div class="modal">
+    <div class="modal-title">➕ <span id="occupyTitle">Занять палатку</span></div>
+    <div class="form-group">
+      <label class="form-label">Ник игрока</label>
+      <input class="form-input" id="oPlayer" type="text" placeholder="Steve">
+    </div>
+    <div class="form-group">
+      <label class="form-label">Telegram ID игрока (необязательно, но важно)</label>
+      <input class="form-input" id="oTgId" type="number" placeholder="Например 5857451420">
+      <div style="font-size:11px;color:var(--text-muted);margin-top:5px">Без него игрок не увидит свою палатку как «мою» в Mini App и не получит автонапоминания от бота. Узнать ID можно у игрока (например через @userinfobot) или посмотреть в заявке на аренду, если он подавал через приложение.</div>
+    </div>
+    <div class="form-group">
+      <label class="form-label">Цветовая метка</label>
+      <div class="lbl-picker" id="oLblPicker"></div>
+    </div>
+    <div class="form-group">
+      <label class="form-label">Тариф</label>
+      <div class="tariff-grid" id="occupyTariffs">
+        <button type="button" class="tariff-btn" data-days="7" data-amount="50"><span class="tariff-period">1 неделя</span><span class="tariff-days">7 дн.</span><span class="tariff-price">50 🛢️</span></button>
+        <button type="button" class="tariff-btn" data-days="14" data-amount="95"><span class="tariff-period">2 недели</span><span class="tariff-days">14 дн.</span><span class="tariff-price">95 🛢️</span><span class="tariff-save">-5 🛢️</span></button>
+        <button type="button" class="tariff-btn" data-days="21" data-amount="135"><span class="tariff-period">3 недели</span><span class="tariff-days">21 дн.</span><span class="tariff-price">135 🛢️</span><span class="tariff-save">-15 🛢️</span></button>
+        <button type="button" class="tariff-btn hot" data-days="30" data-amount="180"><span class="tariff-period">1 месяц 🔥</span><span class="tariff-days">30 дн.</span><span class="tariff-price">180 🛢️</span><span class="tariff-save">-34 🛢️</span></button>
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="form-group"><label class="form-label">Дней</label><input class="form-input" id="oDays" type="number" min="1" placeholder="7"></div>
+      <div class="form-group"><label class="form-label">Сумма (🛢 Нефть)</label><input class="form-input" id="oAmount" type="number" min="0" placeholder="50"></div>
+    </div>
+    <div class="calc-preview">Дата окончания: <span class="val" id="occupyPreview">—</span></div>
+    <div class="form-group">
+      <label class="form-label">Примечание (необязательно)</label>
+      <input class="form-input" id="oNote" type="text" placeholder="Любая заметка...">
+    </div>
+    <div class="modal-actions">
+      <button class="btn-cancel" id="occupyCancel">Отмена</button>
+      <button class="btn-submit" id="occupyOk">Заселить</button>
+    </div>
+  </div>
+</div>
+
+<!-- MODAL: ПРОДЛЕНИЕ -->
+<div class="modal-backdrop" id="renewModal">
+  <div class="modal">
+    <div class="modal-title">🔄 <span id="renewTitle">Продление палатки</span></div>
+    <div class="renew-current-info" id="renewCurrentInfo"></div>
+    <div class="form-group">
+      <label class="form-label">Тариф</label>
+      <div class="tariff-grid" id="renewTariffs">
+        <button type="button" class="tariff-btn" data-days="7" data-amount="50"><span class="tariff-period">1 неделя</span><span class="tariff-days">7 дн.</span><span class="tariff-price">50 🛢️</span></button>
+        <button type="button" class="tariff-btn" data-days="14" data-amount="95"><span class="tariff-period">2 недели</span><span class="tariff-days">14 дн.</span><span class="tariff-price">95 🛢️</span><span class="tariff-save">-5 🛢️</span></button>
+        <button type="button" class="tariff-btn" data-days="21" data-amount="135"><span class="tariff-period">3 недели</span><span class="tariff-days">21 дн.</span><span class="tariff-price">135 🛢️</span><span class="tariff-save">-15 🛢️</span></button>
+        <button type="button" class="tariff-btn hot" data-days="30" data-amount="180"><span class="tariff-period">1 месяц 🔥</span><span class="tariff-days">30 дн.</span><span class="tariff-price">180 🛢️</span><span class="tariff-save">-34 🛢️</span></button>
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="form-group"><label class="form-label">Дней</label><input class="form-input" id="rDays" type="number" min="1" placeholder="7"></div>
+      <div class="form-group"><label class="form-label">Сумма (🛢 Нефть)</label><input class="form-input" id="rAmount" type="number" min="0" placeholder="50"></div>
+    </div>
+    <div class="calc-preview">Новая дата окончания: <span class="val" id="renewPreview">—</span></div>
+    <div class="form-group">
+      <label class="form-label">Примечание (необязательно)</label>
+      <input class="form-input" id="rNote" type="text" placeholder="Любая заметка...">
+    </div>
+    <div class="modal-actions">
+      <button class="btn-cancel" id="renewCancel">Отмена</button>
+      <button class="btn-submit" id="renewOk">Записать продление</button>
+    </div>
+  </div>
+</div>
+
+<!-- MODAL: ИЗМЕНИТЬ (без суммы) -->
+<div class="modal-backdrop" id="editModal">
+  <div class="modal">
+    <div class="modal-title">
+      <svg width="20" height="20" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931zm0 0L19.5 7.125M18 14v4.75A2.25 2.25 0 0115.75 21H5.25A2.25 2.25 0 013 18.75V8.25A2.25 2.25 0 015.25 6H10"/></svg>
+      Изменить палатку <span id="editTentNumLabel" style="color:var(--text-muted);font-size:14px"></span>
+    </div>
+    <div class="form-group"><label class="form-label">Ник игрока</label><input class="form-input" id="ePlayer" type="text"></div>
+    <div class="form-group"><label class="form-label">Telegram ID игрока (необязательно)</label><input class="form-input" id="eTgId" type="number" placeholder="Например 5857451420"></div>
+    <div class="form-group"><label class="form-label">Цветовая метка</label><div class="lbl-picker" id="eLblPicker"></div></div>
+    <div class="form-group"><label class="form-label">Дата окончания</label><input class="form-input" id="eDate" type="date"></div>
+    <div class="form-group"><label class="form-label">Примечание</label><input class="form-input" id="eNote" type="text" placeholder="Любая заметка..."></div>
+    <div style="font-size:11px;color:var(--text-muted);margin-top:-8px;margin-bottom:16px">💡 Сумму платежей можно изменить только через «Продлить» или «Занять» — здесь редактируются только ник, метка, дата и заметка</div>
+    <div class="modal-actions">
+      <button class="btn-cancel" id="editCancel">Отмена</button>
+      <button class="btn-submit" id="editOk">Сохранить</button>
+    </div>
+  </div>
+</div>
+
+<!-- MODAL: ОСВОБОДИТЬ ПАЛАТКУ -->
+<div class="modal-backdrop" id="releaseModal">
+  <div class="modal">
+    <div class="modal-title">🏁 Освободить палатку</div>
+    <p id="releaseMsg" style="color:var(--text-dim);font-size:14px;line-height:1.5;margin-bottom:18px"></p>
+    <div class="form-group">
+      <label class="form-label">Причина (необязательно)</label>
+      <input class="form-input" id="releaseReason" type="text" placeholder="Например: отказался продлевать">
+    </div>
+    <div class="modal-actions">
+      <button class="btn-cancel" id="releaseCancel">Отмена</button>
+      <button class="btn-submit" id="releaseOk" style="background:var(--text-muted)">Освободить</button>
+    </div>
+  </div>
+</div>
+
+<!-- MODAL: МАССОВОЕ ПРОДЛЕНИЕ -->
+<div class="modal-backdrop" id="bulkExtModal">
+  <div class="modal">
+    <div class="modal-title">🔄 Массовое продление</div>
+    <div class="bulk-list" id="bulkExtList"></div>
+    <div class="form-group">
+      <label class="form-label">Тариф</label>
+      <div class="tariff-grid" id="bulkTariffs">
+        <button type="button" class="tariff-btn" data-days="7" data-amount="50"><span class="tariff-period">1 неделя</span><span class="tariff-days">7 дн.</span><span class="tariff-price">50 🛢️</span></button>
+        <button type="button" class="tariff-btn" data-days="14" data-amount="95"><span class="tariff-period">2 недели</span><span class="tariff-days">14 дн.</span><span class="tariff-price">95 🛢️</span></button>
+        <button type="button" class="tariff-btn" data-days="21" data-amount="135"><span class="tariff-period">3 недели</span><span class="tariff-days">21 дн.</span><span class="tariff-price">135 🛢️</span></button>
+        <button type="button" class="tariff-btn hot" data-days="30" data-amount="180"><span class="tariff-period">1 месяц 🔥</span><span class="tariff-days">30 дн.</span><span class="tariff-price">180 🛢️</span></button>
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="form-group"><label class="form-label">Дней</label><input class="form-input" id="bulkDays" type="number" min="1" placeholder="7"></div>
+      <div class="form-group"><label class="form-label">Сумма с каждого (🛢, необязательно)</label><input class="form-input" id="bulkAmount" type="number" min="0" placeholder="0"></div>
+    </div>
+    <div style="font-size:11px;color:var(--text-muted);margin-bottom:16px">Дни прибавятся к текущей (или просроченной) дате каждой выбранной палатки индивидуально</div>
+    <div class="modal-actions">
+      <button class="btn-cancel" id="bulkExtCancel">Отмена</button>
+      <button class="btn-submit" id="bulkExtOk">Продлить</button>
+    </div>
+  </div>
+</div>
+
+<!-- MODAL: МАССОВОЕ ОСВОБОЖДЕНИЕ -->
+<div class="modal-backdrop" id="bulkReleaseModal">
+  <div class="modal">
+    <div class="modal-title">🏁 Массовое освобождение</div>
+    <div class="confirm-msg" id="bulkReleaseMsg"></div>
+    <div class="modal-actions">
+      <button class="btn-cancel" id="bulkReleaseCancel">Отмена</button>
+      <button class="btn-submit" id="bulkReleaseOk" style="background:var(--text-muted)">Освободить все</button>
+    </div>
+  </div>
+</div>
+
+<!-- MODAL: ИСТОРИЯ ПАЛАТКИ -->
+<div class="modal-backdrop" id="tentHistModal">
+  <div class="modal wide">
+    <div class="modal-title">📋 <span id="tentHistTitle">История</span></div>
+    <div class="hist-list" id="tentHistList" style="max-height:380px;overflow-y:auto"></div>
+    <div class="modal-actions">
+      <button class="btn-submit" id="tentHistClose">Закрыть</button>
+    </div>
+  </div>
+</div>
+
+<!-- MODAL: ALERT -->
+<div class="modal-backdrop" id="alertModal">
+  <div class="modal">
+    <div class="modal-title">
+      <svg width="20" height="20" fill="none" viewBox="0 0 24 24" stroke="var(--orange)" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M14.857 17.082a23.848 23.848 0 005.454-1.31A8.967 8.967 0 0118 9.75v-.7V9A6 6 0 006 9v.75a8.967 8.967 0 01-2.312 6.022c1.733.64 3.56 1.085 5.455 1.31m5.714 0a24.255 24.255 0 01-5.714 0m5.714 0a3 3 0 11-5.714 0"/></svg>
+      Требуют внимания!
+    </div>
+    <div class="alert-list" id="alertList"></div>
+    <div class="modal-actions">
+      <button class="btn-submit" id="alertClose">Понял, закрыть</button>
+    </div>
+  </div>
+</div>
+
+<!-- TOAST -->
+<div id="toast"></div>
+
+<!-- FIREBASE + APP LOGIC -->
+<script type="module">
+// ════════════════════════════════════════════════════
+//  FIREBASE CONFIG
+// ════════════════════════════════════════════════════
+const FIREBASE_CONFIG = {
+  apiKey: "AIzaSyBWQwdqwr5RmTu8yu8-EqOVhNBAH0DhBS4",
+  authDomain: "tzprograma-e7b58.firebaseapp.com",
+  projectId: "tzprograma-e7b58",
+  storageBucket: "tzprograma-e7b58.firebasestorage.app",
+  messagingSenderId: "169995178497",
+  appId: "1:169995178497:web:cba6a9b6320705194d6600",
+  measurementId: "G-V2J38X9YPE"
+};
+
+const TENT_COUNT = 20;
+
+// ─── МЕТКИ (цветовые тэги, не путать со статусом занятости) ─
+const LABELS = [
+  { id:'none',   color:null,      name:'Без метки' },
+  { id:'red',    color:'#e74c3c', name:'Красная' },
+  { id:'orange', color:'#f39c12', name:'Оранжевая' },
+  { id:'yellow', color:'#f1c40f', name:'Жёлтая' },
+  { id:'green',  color:'#2ecc71', name:'Зелёная' },
+  { id:'blue',   color:'#3498db', name:'Синяя' },
+  { id:'purple', color:'#9b59b6', name:'Фиолетовая' },
+  { id:'pink',   color:'#e91e63', name:'Розовая' },
+];
+
+// ─── UTILS ──────────────────────────────────────────
+const $ = id => document.getElementById(id);
+const daysUntil = s => {
+  if (!s) return 999;
+  const now = new Date(); now.setHours(0,0,0,0);
+  const end = new Date(s); end.setHours(0,0,0,0);
+  return Math.round((end - now) / 86400000);
+};
+// Статус занятости учитывается ПЕРВЫМ — если палатка свободна, она всегда серая
+function tentStatus(t) {
+  if (!isOccupied(t)) return { key:'free', label:'Свободна', cls:'status-free', color:'var(--text-muted)', order:3 };
+  const d = daysUntil(t.endDate);
+  if (d < 0)  return { key:'expired', label:'Просрочено',       cls:'status-expired', color:'var(--red)',    order:0 };
+  if (d <= 2) return { key:'soon',    label:'Скоро закончится', cls:'status-soon',    color:'var(--orange)', order:1 };
+  return              { key:'paid',   label:'Занято',            cls:'status-paid',    color:'var(--green)',  order:2 };
+}
+const fmtDate = s => {
+  if (!s) return '—';
+  const [y,m,d] = s.split('-');
+  return `${d}.${m}.${y}`;
+};
+const fmtDT = ts => {
+  const d = new Date(ts);
+  return d.toLocaleDateString('ru-RU') + ' ' + d.toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit'});
+};
+const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2);
+const getLbl = id => LABELS.find(l => l.id === id) || LABELS[0];
+
+// Занята ли палатка. Понимает как новую схему (occupied:bool), так и старые записи
+// (мигрированные из прошлой версии приложения, где "closed" означало освобождённую палатку).
+function isOccupied(t) {
+  if (!t) return false;
+  if (t.closed) return false;
+  if (typeof t.occupied === 'boolean') return t.occupied;
+  return !!(t.player && t.endDate);
+}
+
+// ─── ИСТОРИЯ ────────────────────────────────────────
+function loadHist() { try { return JSON.parse(localStorage.getItem('tz_history')||'[]'); } catch { return []; } }
+function saveHist(a) { localStorage.setItem('tz_history', JSON.stringify(a.slice(0,300))); }
+function addHist(type, title, detail='') {
+  const a = loadHist();
+  a.unshift({ type, title, detail, ts: Date.now() });
+  saveHist(a);
+  if (document.querySelector('#page-history.active')) renderHistPage();
+}
+const histIco = { add:'＋', edit:'✎', release:'🏁', bulk:'⚡', renew:'🔄' };
+
+function histItemHTML(h) {
+  return `<div class="hist-item">
+    <div class="hist-ico ${h.type}">${histIco[h.type]||'•'}</div>
+    <div class="hist-body">
+      <div class="hist-title">${h.title}</div>
+      ${h.detail ? `<div class="hist-detail">${h.detail}</div>` : ''}
+      <div class="hist-time">${fmtDT(h.ts)}</div>
+    </div>
+  </div>`;
+}
+function renderHistPage() {
+  const a = loadHist();
+  $('histList').innerHTML = a.length ? a.map(histItemHTML).join('') : '<div style="text-align:center;padding:60px;color:var(--text-muted)">История пуста</div>';
+}
+$('btnClearHist').addEventListener('click', () => {
+  localStorage.removeItem('tz_history');
+  renderHistPage();
+  showToast('История очищена');
+});
+
+// ─── FIREBASE / ЛОКАЛЬНОЕ ХРАНИЛИЩЕ ────────────────────
+let tentsCache = {};
+
+async function initFirebase() {
+  try {
+    const { initializeApp } = await import('https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js');
+    const { getAuth, signInAnonymously } =
+      await import('https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js');
+    const { getFirestore, collection, addDoc, updateDoc, doc, onSnapshot } =
+      await import('https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js');
+    const app = initializeApp(FIREBASE_CONFIG);
+    const auth = getAuth(app);
+    if (!auth.currentUser) await signInAnonymously(auth);
+    const db = getFirestore(app);
+    const col = collection(db, 'tents');
+    let firstSnapshot = true;
+    onSnapshot(col, snap => {
+      tentsCache = {};
+      snap.forEach(d => { tentsCache[d.id] = { id: d.id, ...d.data() }; });
+      renderAll();
+      if (firstSnapshot) { firstSnapshot = false; checkForLocalData(); }
+      // Если раньше уже показывали офлайн, а соединение восстановилось — снимаем баннер.
+      const badge = $('dbStatusBadge');
+      if (badge && badge.classList.contains('offline')) {
+        badge.classList.remove('offline');
+        $('dbStatusDot').classList.remove('offline');
+        $('dbStatusText').textContent = 'LIVE · FIREBASE';
+        $('offlineBanner').style.display = 'none';
+      }
+    }, error => {
+      console.error('Firebase onSnapshot ошибка (тентс):', error);
+      const badge = $('dbStatusBadge');
+      if (badge) {
+        badge.classList.add('offline');
+        $('dbStatusDot').classList.add('offline');
+        $('dbStatusText').textContent = 'ОШИБКА СВЯЗИ';
+        $('offlineBanner').style.display = 'block';
+      }
+    });
+    window._fbAdd = async data => { await addDoc(col, data); };
+    window._fbUpdate = async (id, data) => { await updateDoc(doc(db,'tents',id), data); };
+    window._fbAddHistory = async data => { await addDoc(collection(db, 'rental_history'), data); };
+    return true;
+  } catch(e) { console.warn('Firebase failed:', e); return false; }
+}
+function initLocal() {
+  const load = () => { try { return JSON.parse(localStorage.getItem('tz_tents')||'{}'); } catch { return {}; } };
+  const save = o => localStorage.setItem('tz_tents', JSON.stringify(o));
+  tentsCache = load();
+  window.addEventListener('storage', e => { if(e.key==='tz_tents'){tentsCache=load();renderAll();} });
+  window._fbAdd = async data => { tentsCache=load(); const id=uid(); tentsCache[id]={id,...data}; save(tentsCache); renderAll(); };
+  window._fbUpdate = async (id,data) => { tentsCache=load(); if(tentsCache[id]) tentsCache[id]={...tentsCache[id],...data}; save(tentsCache); renderAll(); };
+  window._fbAddHistory = async () => {};
+}
+
+// ─── 20 ФИКСИРОВАННЫХ СЛОТОВ ────────────────────────────
+function getSlotDoc(n) {
+  return Object.values(tentsCache).find(t => Number(t.tentNum) === n) || null;
+}
+function buildSlots() {
+  const arr = [];
+  for (let n=1; n<=TENT_COUNT; n++) {
+    arr.push(getSlotDoc(n) || { id:null, tentNum:n, occupied:false, player:'', endDate:null, note:'', label:'none', amount:0, payments:[] });
+  }
+  return arr;
+}
+
+// Универсальное сохранение: создаёт документ, если слот никогда не занимался,
+// иначе обновляет существующий (сохраняя всю историю платежей под тем же id).
+async function saveSlot(slot, fields, payment) {
+  const payments = payment ? [...(slot.payments||[]), payment] : (slot.payments||[]);
+  const data = { ...fields, payments, updatedAt: Date.now() };
+  if (payment) { data.amount = payment.amount; }
+  if (slot.id) {
+    await window._fbUpdate(slot.id, data);
+  } else {
+    await window._fbAdd({ tentNum: slot.tentNum, createdAt: Date.now(), ...data });
+  }
+  if (payment && (parseFloat(payment.amount) || 0) > 0 && window._fbAddHistory) {
+    await window._fbAddHistory({
+      tentNum: slot.tentNum,
+      player: payment.player || fields.player || '',
+      tgId: slot.tgId || fields.tgId || null,
+      amount: Number(payment.amount),
+      days: payment.endDate && slot.endDate ? Math.max(0, Math.round((new Date(payment.endDate) - new Date(slot.endDate)) / 86400000)) : 0,
+      endDate: payment.endDate || fields.endDate || '',
+      operationType: payment.note === 'Продление' || String(payment.note || '').toLowerCase().includes('продлен') ? 'renew' : 'rent',
+      operationAt: payment.date || Date.now(),
+      source: 'manager',
+      note: payment.note || ''
+    });
+  }
+}
+
+// ─── ПЛАТЕЖИ / СТАТИСТИКА ────────────────────────────
+function tentPayments(t) {
+  if (t.payments && t.payments.length) return t.payments;
+  if (t.createdAt && t.amount) return [{amount:t.amount, date:t.createdAt}];
+  return [];
+}
+function paidInMonth(t, m, y) {
+  return tentPayments(t).some(p=>{
+    const d=new Date(p.date);
+    return d.getMonth()===m && d.getFullYear()===y && (parseFloat(p.amount)||0)>0;
+  });
+}
+function tentTotalPaid(t) {
+  return tentPayments(t).reduce((s,p)=>s+(parseFloat(p.amount)||0),0);
+}
+function monthRev(m, y) {
+  let sum=0;
+  buildSlots().forEach(t=>{
+    tentPayments(t).forEach(p=>{
+      const d=new Date(p.date);
+      if (d.getMonth()===m && d.getFullYear()===y) sum += parseFloat(p.amount)||0;
+    });
+  });
+  return sum;
+}
+function monthPayers(m, y) {
+  let count=0; const players=new Set();
+  buildSlots().forEach(t=>{
+    tentPayments(t).forEach(p=>{
+      const d=new Date(p.date);
+      if (d.getMonth()===m && d.getFullYear()===y && (parseFloat(p.amount)||0)>0) {
+        count++; players.add(t.player||t.tentNum);
+      }
+    });
+  });
+  return {count, players: players.size};
+}
+
+// ─── SELECT MODE ─────────────────────────────────────
+let selectMode = false;
+let selected = new Set();
+function enterSelect() { selectMode = true; selected.clear(); $('grid').classList.add('select-mode'); $('bulkBar').classList.add('show'); updateBulkBar(); renderAll(); }
+function exitSelect() { selectMode = false; selected.clear(); $('grid').classList.remove('select-mode'); $('bulkBar').classList.remove('show'); renderAll(); }
+function toggleSel(n) {
+  selected.has(n) ? selected.delete(n) : selected.add(n);
+  updateBulkBar();
+  document.querySelectorAll(`.card[data-num="${n}"]`).forEach(c => {
+    c.classList.toggle('selected', selected.has(n));
+    const ch = c.querySelector('.card-check');
+    if (ch) ch.textContent = selected.has(n) ? '✓' : '';
+  });
+}
+function updateBulkBar() { $('bulkCount').textContent = selected.size; }
+$('btnSelectMode').addEventListener('click', enterSelect);
+$('btnExitSelect').addEventListener('click', exitSelect);
+
+// ─── ИКОНКИ (переиспользуемые SVG-строки) ─────────────
+const ICO_HIST = `<svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 6.75a5.25 5.25 0 016.775-5.025.75.75 0 01.313 1.248l-3.32 3.319c.063.475.276.934.641 1.299.365.365.824.578 1.3.64l3.318-3.319a.75.75 0 011.248.313 5.25 5.25 0 01-5.472 6.756c-1.018-.086-1.87.1-2.309.634L7.344 21.3A3.298 3.298 0 112.7 16.657l8.684-7.191c.534-.44.72-1.291.634-2.309A5.342 5.342 0 0112 6.75z"/></svg>`;
+const ICO_EDIT = `<svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931zm0 0L19.5 7.125M18 14v4.75A2.25 2.25 0 0115.75 21H5.25A2.25 2.25 0 013 18.75V8.25A2.25 2.25 0 015.25 6H10"/></svg>`;
+const ICO_RELEASE = `<svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M3 3v18M3 4.5h13.5l-1.5 3 1.5 3H3"/></svg>`;
+const ICO_RENEW = `<svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182m0-4.991v4.99"/></svg>`;
+const ICO_PLUS = `<svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4v16m8-8H4"/></svg>`;
+const ICO_TENT = `<svg width="32" height="32" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M3 9l9-6 9 6M4.5 8.25V21a.75.75 0 00.75.75h13.5a.75.75 0 00.75-.75V8.25M9 21V12h6v9"/></svg>`;
+
+// ─── RENDER ──────────────────────────────────────────
+let currentFilter = 'all', searchQ = '', sortKey = 'num';
+
+const emptyMessages = {
+  free: { icon: '🎉', title: 'Все палатки заняты!', text: 'Свободных мест сейчас нет' },
+  expired: { icon: '✅', title: 'Нет просроченных', text: 'Все действующие аренды оплачены вовремя' },
+  soon: { icon: '👍', title: 'Ничего не истекает', text: 'В ближайшие 2 дня продлений не требуется' },
+  paidThisMonth: { icon: '💤', title: 'Пока никто не платил', text: 'В этом месяце ещё нет ни одного платежа' },
+};
+
+function renderAll() {
+  const grid = $('grid');
+  grid.querySelectorAll('.card').forEach(c=>c.remove());
+
+  const slots = buildSlots();
+  const occupiedCount = slots.filter(isOccupied).length;
+  $('tentsToolbarTitle').textContent = `Палатки (${occupiedCount}/20)`;
+  const now0 = new Date();
+  const q = searchQ.toLowerCase();
+
+  const filtered = slots.filter(t => {
+    const match = !q || (t.player||'').toLowerCase().includes(q) || String(t.tentNum).includes(q);
+    if (!match) return false;
+    const occ = isOccupied(t);
+    if (currentFilter==='free') return !occ;
+    if (currentFilter==='all') return true;
+    if (!occ) return false; // статусные фильтры (занято/скоро/просрочено/платили) не включают свободные слоты
+    if (currentFilter==='paidThisMonth') return paidInMonth(t, now0.getMonth(), now0.getFullYear());
+    return tentStatus(t).key===currentFilter;
+  });
+
+  filtered.sort((a,b) => {
+    if (sortKey==='num')    return a.tentNum-b.tentNum;
+    if (sortKey==='player') return (a.player||'').localeCompare(b.player||'');
+    if (sortKey==='date')   return (a.endDate||'').localeCompare(b.endDate||'');
+    if (sortKey==='amount') return tentTotalPaid(b)-tentTotalPaid(a);
+    if (sortKey==='status') return tentStatus(a).order - tentStatus(b).order || a.tentNum-b.tentNum;
+    return a.tentNum-b.tentNum;
+  });
+
+  // header stats
+  $('statPaid').textContent    = slots.filter(t=>isOccupied(t)&&tentStatus(t).key==='paid').length;
+  $('statSoon').textContent    = slots.filter(t=>isOccupied(t)&&tentStatus(t).key==='soon').length;
+  $('statExpired').textContent = slots.filter(t=>isOccupied(t)&&tentStatus(t).key==='expired').length;
+  $('statFree').textContent    = slots.filter(t=>!isOccupied(t)).length;
+
+  // revenue banner
+  const paidTents = slots.filter(t=>tentTotalPaid(t)>0);
+  const total = paidTents.reduce((s,t)=>s+tentTotalPaid(t),0);
+  const totalPaymentsCount = slots.reduce((s,t)=>s+tentPayments(t).filter(p=>(parseFloat(p.amount)||0)>0).length,0);
+  const avgPayment = totalPaymentsCount ? total/totalPaymentsCount : 0;
+  $('revenueTotalNum').textContent = total.toLocaleString('ru-RU');
+  $('revenueCount').textContent = slots.filter(isOccupied).length;
+  $('revenueAvg').textContent = avgPayment>0 ? '🛢 '+Math.round(avgPayment).toLocaleString('ru-RU') : '—';
+
+  const now = new Date();
+  const tm = now.getMonth(), ty = now.getFullYear();
+  const pd = new Date(ty, tm-1, 1);
+  const thisM = monthRev(tm, ty);
+  const prevM = monthRev(pd.getMonth(), pd.getFullYear());
+  $('revenueMonth').textContent = '🛢 '+thisM.toLocaleString('ru-RU');
+  $('revenuePrev').textContent  = '🛢 '+prevM.toLocaleString('ru-RU');
+
+  // alert badge (просрочено или истекает сегодня, только для занятых)
+  const alertN = slots.filter(t=>isOccupied(t) && (daysUntil(t.endDate)<=0)).length;
+  const badge = $('alertBadge');
+  badge.textContent = alertN;
+  badge.style.display = alertN>0 ? '' : 'none';
+
+  // empty state
+  $('emptyState').style.display = filtered.length ? 'none' : 'block';
+  if (!filtered.length) {
+    if (q) {
+      $('emptyState').innerHTML = `<svg width="48" height="48" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg><h3>Ничего не найдено</h3><p>Попробуйте изменить запрос поиска</p>`;
+    } else if (emptyMessages[currentFilter]) {
+      const m = emptyMessages[currentFilter];
+      $('emptyState').innerHTML = `<div style="font-size:48px;opacity:.6;margin-bottom:16px">${m.icon}</div><h3>${m.title}</h3><p>${m.text}</p>`;
+    } else {
+      $('emptyState').innerHTML = `<svg width="48" height="48" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg><h3>Ничего не найдено</h3><p>Попробуйте изменить фильтр</p>`;
+    }
+  }
+
+  filtered.forEach((t,i) => {
+    const occ = isOccupied(t);
+    const st = tentStatus(t);
+    const d = daysUntil(t.endDate);
+    let cd = '';
+    if (occ) {
+      if (d<0)       cd=`<span class="countdown" style="background:var(--red-dim);color:var(--red)">просрочено на ${Math.abs(d)} д.</span>`;
+      else if(d===0) cd=`<span class="countdown" style="background:var(--orange-dim);color:var(--orange)">последний день</span>`;
+      else if(d<=2)  cd=`<span class="countdown" style="background:var(--orange-dim);color:var(--orange)">осталось ${d} д.</span>`;
+      else           cd=`<span class="countdown" style="background:var(--green-dim);color:var(--green)">осталось ${d} д.</span>`;
+    }
+
+    const lbl = getLbl(t.label);
+    const lblBar  = (occ && lbl.color) ? `<div class="card-label-bar" style="background:${lbl.color}"></div>` : '';
+    const lblChip = (occ && lbl.color) ? `<div class="label-chip" style="background:${lbl.color}22;color:${lbl.color};border:1px solid ${lbl.color}44">${lbl.name}</div>` : '';
+    const now2 = new Date();
+    const paidThisMonth = occ && paidInMonth(t, now2.getMonth(), now2.getFullYear());
+    const paidChip = paidThisMonth ? `<div class="paid-chip" title="Есть оплата в этом месяце">✓ оплата в этом мес.</div>` : '';
+
+    const card = document.createElement('div');
+    card.className = 'card' + (occ?'':' vacant') + (selectMode&&occ?' select-mode':'') + (selected.has(t.tentNum)?' selected':'');
+    card.style.setProperty('--status-color', st.color);
+    card.style.animationDelay = `${i*0.025}s`;
+    card.dataset.num = t.tentNum;
+    if (t.id) card.dataset.id = t.id;
+
+    if (!occ) {
+      card.innerHTML = `
+        <div class="card-header">
+          <div class="tent-num">Палатка #${t.tentNum}</div>
+          <div class="status-badge ${st.cls}">⚪ ${st.label}</div>
+        </div>
+        <div class="vacant-body">
+          ${ICO_TENT}
+          <div class="vacant-label">Свободна</div>
+          ${tentTotalPaid(t)>0?`<div class="vacant-hist-hint">Ранее принесла 🛢 ${tentTotalPaid(t).toLocaleString('ru-RU')}</div>`:''}
+        </div>
+        <div class="card-actions">
+          <button class="btn-renew-primary" data-occupy="${t.tentNum}">${ICO_PLUS} Занять</button>
+          ${t.id ? `<div class="card-actions-row"><button class="btn-icon" data-hist="${t.id}" title="История палатки" style="width:100%">${ICO_HIST}<span>История</span></button></div>` : ''}
+        </div>
+      `;
+    } else {
+      card.innerHTML = `
+        ${lblBar}
+        <div class="card-check">${selected.has(t.tentNum)?'✓':''}</div>
+        <div class="card-header">
+          <div>
+            <div class="tent-num">Палатка #${t.tentNum}</div>
+            <div class="player-name">${t.player||'Неизвестно'}</div>
+            <div class="chip-row">${lblChip}${paidChip}${t.tgId ? `<div class="label-chip" style="background:var(--green-dim);color:var(--green);border:1px solid rgba(46,204,113,.35)" title="Telegram ID: ${t.tgId}">🔗 TG привязан</div>` : `<div class="label-chip" style="background:var(--red-dim);color:var(--red);border:1px solid rgba(231,76,60,.35)" title="Игрок не увидит палатку в Mini App, напоминания не придут">⚠️ Без TG ID</div>`}</div>
+          </div>
+          <div class="status-badge ${st.cls}">${st.key==='paid'?'🟢':st.key==='soon'?'🟡':'🔴'} ${st.label}</div>
+        </div>
+        <div class="card-divider"></div>
+        <div class="card-meta">
+          <div class="meta-row">
+            <span class="meta-label">
+              <svg width="13" height="13" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+              Окончание
+            </span>
+            <span class="meta-value highlight">${fmtDate(t.endDate)}</span>
+          </div>
+          <div class="meta-row"><span class="meta-label">Осталось</span>${cd}</div>
+          ${t.note?`<div class="meta-row"><span class="meta-label">Заметка</span><span class="meta-value">${t.note}</span></div>`:''}
+          ${t.amount>0?`<div class="meta-row"><span class="meta-label">Последний платёж</span><span class="meta-value highlight" style="color:var(--accent)">🛢 ${parseFloat(t.amount).toLocaleString('ru-RU')}</span></div>`:''}
+          ${tentTotalPaid(t)>0?`<div class="meta-row"><span class="meta-label">Оплачено всего</span><span class="meta-value highlight" style="color:var(--green)">🛢 ${tentTotalPaid(t).toLocaleString('ru-RU')}</span></div>`:''}
+        </div>
+        <div class="card-actions" style="${selectMode?'display:none':''}">
+          <button class="btn-renew-primary" data-renew="${t.tentNum}">${ICO_RENEW} Продлить</button>
+          <div class="card-actions-row">
+            <button class="btn-icon" data-hist="${t.id}" title="История платежей">${ICO_HIST}</button>
+            <button class="btn-icon" data-edit="${t.tentNum}" title="Изменить">${ICO_EDIT}</button>
+            <button class="btn-icon release" data-release="${t.tentNum}" title="Освободить палатку">${ICO_RELEASE}</button>
+          </div>
+        </div>
+      `;
+    }
+    if (selectMode && occ) card.addEventListener('click', ()=>toggleSel(t.tentNum));
+    grid.insertBefore(card, $('emptyState'));
+  });
+
+  grid.querySelectorAll('[data-occupy]').forEach(b=>b.addEventListener('click',e=>{e.stopPropagation();openOccupy(parseInt(b.dataset.occupy));}));
+  grid.querySelectorAll('[data-renew]').forEach(b=>b.addEventListener('click',e=>{e.stopPropagation();openRenew(parseInt(b.dataset.renew));}));
+  grid.querySelectorAll('[data-edit]').forEach(b=>b.addEventListener('click',e=>{e.stopPropagation();openEdit(parseInt(b.dataset.edit));}));
+  grid.querySelectorAll('[data-release]').forEach(b=>b.addEventListener('click',e=>{e.stopPropagation();openRelease(parseInt(b.dataset.release));}));
+  grid.querySelectorAll('[data-hist]').forEach(b=>b.addEventListener('click',e=>{e.stopPropagation();openTentHist(b.dataset.hist);}));
+
+  if (document.querySelector('#page-stats.active')) renderStats();
+  if (document.querySelector('#page-payments.active')) renderPayments();
+}
+
+// ─── ИСТОРИЯ ПАЛАТКИ ─────────────────────────────────
+function openTentHist(id) {
+  const t = tentsCache[id];
+  if (!t) return;
+  const fromLog = loadHist().filter(h => h.detail && h.detail.includes(`#${t.tentNum}`));
+  const fromPayments = tentPayments(t).map(p => ({
+    type:'renew',
+    title:`Оплата · Палатка #${t.tentNum}${p.player?' ('+p.player+')':t.player?' ('+t.player+')':''}`,
+    detail:`🛢 ${parseFloat(p.amount||0).toLocaleString('ru-RU')} нефти${p.endDate?' · до '+fmtDate(p.endDate):''}${p.note?' · '+p.note:''}`,
+    ts:p.date
+  }));
+  const items = [...fromLog, ...fromPayments].sort((a,b)=>b.ts-a.ts);
+  $('tentHistTitle').textContent = `Палатка #${t.tentNum||'—'}${t.player?' — '+t.player:''}`;
+  $('tentHistList').innerHTML = items.length ? items.map(histItemHTML).join('') : '<div style="color:var(--text-muted);padding:20px;text-align:center">Нет записей для этой палатки</div>';
+  $('tentHistModal').classList.add('open');
+}
+$('tentHistClose').addEventListener('click',()=>$('tentHistModal').classList.remove('open'));
+$('tentHistModal').addEventListener('click',e=>{if(e.target===$('tentHistModal'))$('tentHistModal').classList.remove('open');});
+
+// ─── СТАТИСТИКА ──────────────────────────────────────
+function renderStats() {
+  const slots = buildSlots();
+  const now = new Date();
+  const tm=now.getMonth(), ty=now.getFullYear();
+  const pd=new Date(ty,tm-1,1);
+  const thisM=monthRev(tm,ty), prevM=monthRev(pd.getMonth(),pd.getFullYear());
+  const total=slots.reduce((s,t)=>s+tentTotalPaid(t),0);
+  const totalPaymentsCount=slots.reduce((s,t)=>s+tentPayments(t).filter(p=>(parseFloat(p.amount)||0)>0).length,0);
+  const pct=prevM>0?Math.round(((thisM-prevM)/prevM)*100):null;
+  const payersM=monthPayers(tm,ty);
+  const occupiedCount = slots.filter(isOccupied).length;
+
+  const cards=[
+    {label:'Доход этот месяц',   val:'🛢 '+thisM.toLocaleString('ru-RU'),  sub:'нефти', c:'var(--accent)', trend:pct!==null?(pct>=0?'+'+pct+'%':pct+'%'):null, tCls:pct!=null?(pct>=0?'trend-up':'trend-down'):null},
+    {label:'Прошлый месяц',      val:'🛢 '+prevM.toLocaleString('ru-RU'), sub:'нефти', c:'var(--text-muted)'},
+    {label:'Оплат в этом месяце',val:payersM.count, sub:`игроков: ${payersM.players}`, c:'var(--purple)'},
+    {label:'Суммарно',           val:'🛢 '+total.toLocaleString('ru-RU'), sub:'за всё время', c:'var(--green)'},
+    {label:'Занято палаток',     val:`${occupiedCount} / 20`, sub:`свободно: ${20-occupiedCount}`, c:'var(--blue)'},
+    {label:'Просрочено',         val:slots.filter(t=>isOccupied(t)&&tentStatus(t).key==='expired').length, sub:'требуют внимания', c:'var(--red)'},
+    {label:'Скоро истекает',     val:slots.filter(t=>isOccupied(t)&&tentStatus(t).key==='soon').length, sub:'≤2 дней', c:'var(--orange)'},
+    {label:'Средний платёж',     val:'🛢 '+Math.round(totalPaymentsCount?total/totalPaymentsCount:0).toLocaleString('ru-RU'), sub:'за одну оплату', c:'var(--purple)'},
+  ];
+  $('statsCards').innerHTML=cards.map(c=>`
+    <div class="stat-card" style="--c:${c.c}">
+      ${c.trend?`<div class="stat-card-trend ${c.tCls}">${c.trend}</div>`:''}
+      <div class="stat-card-label">${c.label}</div>
+      <div class="stat-card-value">${c.val}</div>
+      <div class="stat-card-sub">${c.sub}</div>
+    </div>
+  `).join('');
+
+  const months=[];
+  for(let i=5;i>=0;i--){
+    const d=new Date(ty,tm-i,1);
+    months.push({m:d.getMonth(),y:d.getFullYear(),rev:monthRev(d.getMonth(),d.getFullYear()),lbl:d.toLocaleString('ru-RU',{month:'short'})});
+  }
+  const maxR=Math.max(...months.map(m=>m.rev),1);
+  $('barChart').innerHTML=months.map(m=>{
+    const pct=Math.round((m.rev/maxR)*100)||2;
+    const cur=m.m===tm&&m.y===ty;
+    return `<div class="bar-col"><div class="bar${cur?' cur':''}" style="height:${pct}%"><div class="bar-tip">🛢 ${m.rev.toLocaleString('ru-RU')}</div></div><div class="bar-lbl">${m.lbl}</div></div>`;
+  }).join('');
+
+  const sorted=slots.map(t=>({...t,_total:tentTotalPaid(t)})).filter(t=>t._total>0).sort((a,b)=>b._total-a._total).slice(0,5);
+  $('topList').innerHTML=sorted.length
+    ?sorted.map((t,i)=>`<div class="top-item"><div class="top-rank ${i<3?'r'+(i+1):''}">${i+1}</div><div class="top-name">${t.player||'?'} <span style="color:var(--text-muted);font-size:11px">#${t.tentNum}</span></div><div class="top-val">🛢 ${t._total.toLocaleString('ru-RU')}</div></div>`).join('')
+    :'<div style="color:var(--text-muted);padding:12px;font-size:13px">Нет данных</div>';
+
+  const lc={};
+  slots.filter(isOccupied).forEach(t=>{const l=t.label||'none';lc[l]=(lc[l]||0)+1;});
+  const lbls=LABELS.filter(l=>lc[l.id]).sort((a,b)=>(lc[b.id]||0)-(lc[a.id]||0));
+  $('lblStatList').innerHTML=lbls.length
+    ?lbls.map(l=>`<div class="top-item"><div style="width:12px;height:12px;border-radius:50%;background:${l.color||'var(--border)'};flex-shrink:0"></div><div class="top-name">${l.name}</div><div class="top-val" style="color:var(--text-dim)">${lc[l.id]} шт.</div></div>`).join('')
+    :'<div style="color:var(--text-muted);padding:12px;font-size:13px">Нет меток</div>';
+}
+
+// ─── РЕЕСТР ПЛАТЕЖЕЙ ─────────────────────────────────
+let paySearchQ='';
+const payTypeMeta = {
+  purchase: {label:'🆕 Занятие',    color:'var(--green)',  dim:'var(--green-dim)'},
+  renew:    {label:'🔄 Продление',  color:'var(--purple)', dim:'var(--purple-dim)'},
+  bulk:     {label:'⚡ Массовое',    color:'var(--blue)',   dim:'var(--blue-dim)'},
+};
+function paymentType(p) {
+  if (p.note==='Занята палатка') return 'purchase';
+  if (p.note==='Массовое продление') return 'bulk';
+  return 'renew';
+}
+function buildPaymentsList() {
+  const rows=[];
+  buildSlots().forEach(t=>{
+    tentPayments(t).forEach(p=>{
+      rows.push({
+        date: p.date,
+        player: p.player || t.player || 'Неизвестно',
+        tentNum: t.tentNum,
+        amount: parseFloat(p.amount)||0,
+        endDate: p.endDate||t.endDate,
+        note: p.note||'',
+        type: paymentType(p)
+      });
+    });
+  });
+  rows.sort((a,b)=>b.date-a.date);
+  return rows;
+}
+function startOfDay(d){ const x=new Date(d); x.setHours(0,0,0,0); return x; }
+function endOfDay(d){ const x=new Date(d); x.setHours(23,59,59,999); return x; }
+function startOfWeek(d){ const x=new Date(d); const day=(x.getDay()+6)%7; x.setDate(x.getDate()-day); return startOfDay(x); }
+function endOfWeek(d){ const x=startOfWeek(d); x.setDate(x.getDate()+6); return endOfDay(x); }
+function startOfMonth(d){ return startOfDay(new Date(d.getFullYear(), d.getMonth(), 1)); }
+function endOfMonth(d){ return endOfDay(new Date(d.getFullYear(), d.getMonth()+1, 0)); }
+let payRangeMode = 'week';
+function computeRange(mode) {
+  const now = new Date();
+  if (mode==='today')     return { from:startOfDay(now), to:endOfDay(now) };
+  if (mode==='week')      return { from:startOfWeek(now), to:endOfWeek(now) };
+  if (mode==='lastWeek')  { const p=new Date(now); p.setDate(p.getDate()-7); return { from:startOfWeek(p), to:endOfWeek(p) }; }
+  if (mode==='month')     return { from:startOfMonth(now), to:endOfMonth(now) };
+  if (mode==='lastMonth') { const p=new Date(now.getFullYear(), now.getMonth()-1, 1); return { from:startOfMonth(p), to:endOfMonth(p) }; }
+  if (mode==='all')       return { from:null, to:null };
+  if (mode==='custom') {
+    const fV=$('payFrom').value, tV=$('payTo').value;
+    return { from: fV?startOfDay(new Date(fV)):null, to: tV?endOfDay(new Date(tV)):null };
+  }
+  return { from:null, to:null };
+}
+function currentRangeLabel() {
+  const chip = document.querySelector('.period-chip.active');
+  return chip ? chip.textContent : 'Свой период';
+}
+function getFilteredPayments() {
+  const range = computeRange(payRangeMode);
+  const all = buildPaymentsList();
+  const q = paySearchQ.trim().toLowerCase();
+  const rows = all.filter(r=>{
+    const matchQ = !q || r.player.toLowerCase().includes(q) || String(r.tentNum).includes(q);
+    const matchR = (!range.from || r.date>=range.from.getTime()) && (!range.to || r.date<=range.to.getTime());
+    return matchQ && matchR;
+  });
+  return { rows, range, label: currentRangeLabel() };
+}
+function renderPayments() {
+  const { rows: filtered, label } = getFilteredPayments();
+  const total = filtered.reduce((s,r)=>s+r.amount,0);
+  const players = new Set(filtered.filter(r=>r.amount>0).map(r=>r.player));
+  $('paymentsTotal').textContent = total.toLocaleString('ru-RU');
+  $('paymentsCount').textContent = filtered.length;
+  $('paymentsPlayers').textContent = players.size;
+  $('paymentsPeriodLabel').textContent = `Сумма за период — ${label}`;
+  $('paymentsBody').innerHTML = filtered.length ? filtered.map(r=>{
+    const tm = payTypeMeta[r.type];
+    return `<tr>
+      <td>${fmtDT(r.date)}</td>
+      <td class="pay-player">${r.player}</td>
+      <td>#${r.tentNum}</td>
+      <td><span class="pay-type-chip" style="background:${tm.dim};color:${tm.color}">${tm.label}</span></td>
+      <td class="pay-amount">${r.amount>0 ? '🛢 '+r.amount.toLocaleString('ru-RU') : '—'}</td>
+      <td>${fmtDate(r.endDate)}</td>
+      <td class="pay-note">${r.note||'—'}</td>
+    </tr>`;
+  }).join('') : `<tr><td colspan="7" style="text-align:center;padding:40px;color:var(--text-muted)">Записей не найдено за выбранный период</td></tr>`;
+}
+$('paySearchInput').addEventListener('input', e=>{ paySearchQ=e.target.value; renderPayments(); });
+document.querySelectorAll('.period-chip').forEach(btn=>
+  btn.addEventListener('click',()=>{
+    document.querySelectorAll('.period-chip').forEach(b=>b.classList.remove('active'));
+    btn.classList.add('active');
+    payRangeMode = btn.dataset.range;
+    $('payFrom').value=''; $('payTo').value='';
+    renderPayments();
+  })
+);
+function onCustomRangeChange(){
+  document.querySelectorAll('.period-chip').forEach(b=>b.classList.remove('active'));
+  payRangeMode='custom';
+  renderPayments();
+}
+$('payFrom').addEventListener('change', onCustomRangeChange);
+$('payTo').addEventListener('change', onCustomRangeChange);
+
+// ─── ТЕКСТОВЫЙ ОТЧЁТ ──────────────────────────────────
+function generateReportText(rows, range, label) {
+  const total = rows.reduce((s,r)=>s+r.amount,0);
+  const players = new Set(rows.filter(r=>r.amount>0).map(r=>r.player));
+  const byType = {};
+  rows.forEach(r=>{ if (!byType[r.type]) byType[r.type] = {count:0, sum:0}; byType[r.type].count++; byType[r.type].sum += r.amount; });
+  const typeOrder = ['purchase','renew','bulk'];
+  const typeNames = {purchase:'Новые заселения', renew:'Продления', bulk:'Массовые продления'};
+  const periodStr = (range.from||range.to) ? `${range.from?range.from.toLocaleDateString('ru-RU'):'…'} – ${range.to?range.to.toLocaleDateString('ru-RU'):'…'}` : 'за всё время';
+  const lines = [];
+  lines.push('📊 ОТЧЁТ ПО ПАЛАТКАМ');
+  lines.push(`Период: ${label} (${periodStr})`);
+  lines.push('');
+  lines.push(`💰 Общий доход: 🛢 ${total.toLocaleString('ru-RU')} нефти`);
+  lines.push(`🧾 Платежей: ${rows.length}`);
+  lines.push(`👤 Игроков заплатило: ${players.size}`);
+  lines.push('');
+  lines.push('Разбивка по типу:');
+  typeOrder.filter(t=>byType[t]).forEach(t=>{ lines.push(`• ${typeNames[t]}: ${byType[t].count} шт. — 🛢 ${byType[t].sum.toLocaleString('ru-RU')}`); });
+  if (!rows.length) lines.push('• Нет платежей за этот период');
+  lines.push('');
+  lines.push(`Сформировано: ${fmtDT(Date.now())}`);
+  return lines.join('\n');
+}
+$('btnCopyReport').addEventListener('click', async()=>{
+  const { rows, range, label } = getFilteredPayments();
+  const text = generateReportText(rows, range, label);
+  try { await navigator.clipboard.writeText(text); showToast('Отчёт скопирован — можно вставлять','success'); }
+  catch(e) { showToast('Не удалось скопировать: браузер запретил доступ к буферу','error'); }
+});
+
+// ─── DISCORD ANSI ОТЧЁТ ───────────────────────────────
+const ESC = '\x1b';
+function ansi(code, text){ return `${ESC}[${code}m${text}${ESC}[0m`; }
+function generateDiscordReport() {
+  const { rows, label } = getFilteredPayments();
+  const totalIncome = rows.reduce((s,r)=>s+r.amount,0);
+  const slots = buildSlots();
+  const occupied = slots.filter(isOccupied);
+  const free = slots.filter(t=>!isOccupied(t));
+  const expired = occupied.filter(t=>daysUntil(t.endDate)<0).sort((a,b)=>daysUntil(a.endDate)-daysUntil(b.endDate));
+  const freeNums = free.map(t=>t.tentNum).join(', ') || '—';
+  const expiredLines = expired.length
+    ? expired.map(t=>`  #${String(t.tentNum).padStart(2,'0')} ${t.player||'?'} — просрочено на ${Math.abs(daysUntil(t.endDate))} дн.`).join('\n')
+    : '  Нет просроченных палаток ✅';
+  const body = [
+    ansi('1;36', '📊 ОТЧЁТ ТОРГОВОЙ ЗОНЫ (20 ПАЛАТОК)'),
+    '───────────────────────────────────────',
+    `💰 ${ansi('1;32','Общий доход за период')} (${label}): ${totalIncome.toLocaleString('ru-RU')} 🛢️ нефти`,
+    `⛺ ${ansi('1;33','Занято палаток:')} ${occupied.length} / 20`,
+    `🆓 ${ansi('1;30','Свободно:')} ${free.length} палаток (номера: ${freeNums})`,
+    '',
+    `🚨 ${ansi('1;31','ПРОСРОЧЕНЫ:')}`,
+    expiredLines,
+    '───────────────────────────────────────'
+  ].join('\n');
+  return '```ansi\n' + body + '\n```';
+}
+$('btnDiscordReport').addEventListener('click', async()=>{
+  const text = generateDiscordReport();
+  try { await navigator.clipboard.writeText(text); showToast('Discord-отчёт скопирован','success'); }
+  catch(e) { showToast('Не удалось скопировать: браузер запретил доступ к буферу','error'); }
+});
+
+function exportPaymentsCSV() {
+  const { rows } = getFilteredPayments();
+  if (!rows.length) { showToast('Нет платежей за выбранный период','error'); return; }
+  const out = [['Дата','Время','Игрок','Палатка','Тип','Сумма','Продлено до','Заметка']];
+  rows.forEach(r=>{
+    const d = new Date(r.date);
+    out.push([d.toLocaleDateString('ru-RU'), d.toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit'}), r.player, r.tentNum, payTypeMeta[r.type].label.replace(/^\S+\s/,''), r.amount, fmtDate(r.endDate), r.note]);
+  });
+  const csv = out.map(r=>r.map(v=>`"${String(v).replace(/"/g,'""')}"`).join(',')).join('\r\n');
+  const blob = new Blob(['\uFEFF'+csv],{type:'text/csv;charset=utf-8;'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href=url; a.download=`tz_payments_${new Date().toISOString().split('T')[0]}.csv`;
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
+  showToast('CSV файл скачан','success');
+}
+$('btnExportPaymentsCsv').addEventListener('click', exportPaymentsCSV);
+
+function exportCSV(){
+  const slots=buildSlots();
+  const rows=[['Номер палатки','Статус','Игрок','Дата окончания','Последний платёж','Метка','Примечание','Оплачено всего за всё время','Кол-во платежей']];
+  slots.forEach(t=>{
+    const pays=tentPayments(t);
+    const totalPaid=pays.reduce((s,p)=>s+(parseFloat(p.amount)||0),0);
+    rows.push([t.tentNum, isOccupied(t)?tentStatus(t).label:'Свободна', t.player||'', fmtDate(t.endDate), t.amount||0, getLbl(t.label).name, (t.note||'').replace(/[\r\n]+/g,' '), totalPaid, pays.length]);
+  });
+  const csv=rows.map(r=>r.map(v=>`"${String(v).replace(/"/g,'""')}"`).join(',')).join('\r\n');
+  const blob=new Blob(['\uFEFF'+csv],{type:'text/csv;charset=utf-8;'});
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement('a');
+  a.href=url; a.download=`tz_export_${new Date().toISOString().split('T')[0]}.csv`;
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
+  showToast('CSV файл скачан','success');
+}
+$('btnExportCsv').addEventListener('click', exportCSV);
+
+// ─── ALERT ───────────────────────────────────────────
+function checkAlerts() {
+  const slots = buildSlots();
+  const bad = slots.filter(t=>isOccupied(t) && daysUntil(t.endDate)<=0);
+  if (!bad.length) return;
+  const key='tz_alert_'+new Date().toDateString();
+  if (localStorage.getItem(key)) return;
+  localStorage.setItem(key,'1');
+  $('alertList').innerHTML=bad.map(t=>{
+    const d=daysUntil(t.endDate);
+    const cls=d<0?'err':'warn';
+    const txt=d<0?`Просрочено на ${Math.abs(d)} дн.`:'Истекает сегодня';
+    return `<div class="alert-item ${cls}">
+      <div style="font-size:22px">${d<0?'🔴':'🟠'}</div>
+      <div class="alert-item-body">
+        <div class="alert-item-name">${t.player||'?'} — Палатка #${t.tentNum}</div>
+        <div class="alert-item-sub">${txt}</div>
+      </div>
+    </div>`;
+  }).join('');
+  $('alertModal').classList.add('open');
+}
+$('alertClose').addEventListener('click',()=>$('alertModal').classList.remove('open'));
+$('alertModal').addEventListener('click',e=>{if(e.target===$('alertModal'))$('alertModal').classList.remove('open');});
+
+// ─── LABEL PICKERS (отдельные для Занять / Изменить) ───
+function buildPickerInto(containerId, selected, onSelect) {
+  $(containerId).innerHTML=LABELS.map(l=>`
+    <div class="lbl-opt${l.id==='none'?' none':''}${selected===l.id?' on':''}"
+         style="${l.color?`background:${l.color}`:''}" data-lbl="${l.id}" title="${l.name}">
+      ${selected===l.id?'✓':''}
+    </div>
+  `).join('');
+  $(containerId).querySelectorAll('.lbl-opt').forEach(el=> el.addEventListener('click',()=>onSelect(el.dataset.lbl)) );
+}
+
+// ─── ТАРИФНЫЕ ПРЕСЕТЫ (переиспользуемая логика) ───────
+function wireTariffs(containerId, daysId, amountId, onChange) {
+  document.querySelectorAll(`#${containerId} .tariff-btn`).forEach(btn=>
+    btn.addEventListener('click', ()=>{
+      $(daysId).value = btn.dataset.days;
+      $(amountId).value = btn.dataset.amount;
+      document.querySelectorAll(`#${containerId} .tariff-btn`).forEach(b=>b.classList.remove('active'));
+      btn.classList.add('active');
+      onChange();
+    })
+  );
+  [daysId, amountId].forEach(id=>{
+    $(id).addEventListener('input', ()=>{
+      document.querySelectorAll(`#${containerId} .tariff-btn`).forEach(b=>b.classList.remove('active'));
+      onChange();
+    });
+  });
+}
+
+// ─── ЗАНЯТЬ ПАЛАТКУ ────────────────────────────────────
+let occupyNum = null, oSelLabel='none';
+function openOccupy(n) {
+  occupyNum = n;
+  const slot = getSlotDoc(n) || {tentNum:n};
+  $('occupyTitle').textContent = `Занять палатку #${n}`;
+  $('oPlayer').value = '';
+  $('oTgId').value = '';
+  $('oNote').value = '';
+  $('oDays').value = '';
+  $('oAmount').value = '';
+  oSelLabel = 'none';
+  buildPickerInto('oLblPicker', oSelLabel, v=>{ oSelLabel=v; buildPickerInto('oLblPicker', oSelLabel, arguments.callee); });
+  document.querySelectorAll('#occupyTariffs .tariff-btn').forEach(b=>b.classList.remove('active'));
+  updateOccupyPreview();
+  $('occupyModal').classList.add('open');
+  setTimeout(()=>$('oPlayer').focus(),120);
+}
+function updateOccupyPreview() {
+  const days = parseInt($('oDays').value);
+  if (!days || days<1) { $('occupyPreview').textContent = '—'; return; }
+  const base = new Date(); base.setHours(12,0,0,0);
+  base.setDate(base.getDate()+days);
+  $('occupyPreview').textContent = fmtDate(base.toISOString().split('T')[0]) + ` (через ${days} дн. от сегодня)`;
+}
+wireTariffs('occupyTariffs','oDays','oAmount', updateOccupyPreview);
+$('occupyCancel').addEventListener('click',()=>$('occupyModal').classList.remove('open'));
+$('occupyModal').addEventListener('click',e=>{if(e.target===$('occupyModal'))$('occupyModal').classList.remove('open');});
+$('occupyOk').addEventListener('click', async()=>{
+  const player = $('oPlayer').value.trim();
+  const tgIdRaw = $('oTgId').value.trim();
+  const tgId = tgIdRaw ? parseInt(tgIdRaw, 10) : null;
+  const days = parseInt($('oDays').value);
+  const amount = parseFloat($('oAmount').value)||0;
+  const note = $('oNote').value.trim();
+  if (!player) { showToast('Укажите ник игрока','error'); return; }
+  if (tgIdRaw && !tgId) { showToast('Telegram ID должен быть числом','error'); return; }
+  if (!days || days<1) { showToast('Укажите количество дней (или выберите тариф)','error'); return; }
+  if (amount<0) { showToast('Сумма не может быть отрицательной','error'); return; }
+  const base = new Date(); base.setHours(12,0,0,0);
+  base.setDate(base.getDate()+days);
+  const endDate = base.toISOString().split('T')[0];
+  $('occupyModal').classList.remove('open');
+  const slot = getSlotDoc(occupyNum) || {tentNum:occupyNum, payments:[]};
+  const payment = {amount, date:Date.now(), endDate, player, note:'Занята палатка'};
+  addHist('add', `Заселена палатка #${occupyNum} (${player})`, `${days} дн. · 🛢 ${amount} · до ${fmtDate(endDate)}`);
+  await saveSlot(slot, {occupied:true, player, tgId, label:oSelLabel, note, endDate}, payment);
+  occupyNum = null;
+});
+
+// ─── ПРОДЛЕНИЕ ─────────────────────────────────────────
+// КЛЮЧЕВАЯ ЛОГИКА: новые дни ВСЕГДА прибавляются к предыдущей дате окончания,
+// даже если палатка просрочена на много дней — это гарантирует, что оплата
+// покрывает накопившийся долг, а не начинает отсчёт заново от сегодня.
+let renewNum = null;
+function computeRenewedEndDate(slot, days) {
+  const base = slot.endDate ? new Date(slot.endDate) : new Date();
+  base.setHours(12,0,0,0);
+  base.setDate(base.getDate()+days);
+  return base.toISOString().split('T')[0];
+}
+function openRenew(n) {
+  const slot = getSlotDoc(n);
+  if (!slot || !isOccupied(slot)) return;
+  renewNum = n;
+  $('renewTitle').textContent = `Продление — Палатка #${n} (${slot.player||'?'})`;
+  const d = daysUntil(slot.endDate);
+  const overdueTxt = d<0 ? ` <span style="color:var(--red);font-weight:700">— просрочено на ${Math.abs(d)} дн.</span>` : (d<=2?` <span style="color:var(--orange);font-weight:700">— скоро истекает</span>`:'');
+  $('renewCurrentInfo').innerHTML = `Текущая дата окончания: <b>${fmtDate(slot.endDate)}</b>${overdueTxt}`;
+  $('rDays').value=''; $('rAmount').value=''; $('rNote').value='';
+  document.querySelectorAll('#renewTariffs .tariff-btn').forEach(b=>b.classList.remove('active'));
+  updateRenewPreview();
+  $('renewModal').classList.add('open');
+  setTimeout(()=>$('rDays').focus(),120);
+}
+function updateRenewPreview() {
+  const days = parseInt($('rDays').value);
+  const slot = getSlotDoc(renewNum);
+  if (!slot || !days || days<1) { $('renewPreview').textContent = '—'; return; }
+  const newEnd = computeRenewedEndDate(slot, days);
+  const stillOverdue = daysUntil(newEnd) < 0;
+  $('renewPreview').innerHTML = fmtDate(newEnd) + (stillOverdue ? ` <span style="color:var(--red)">(долг ещё не покрыт полностью)</span>` : '');
+}
+wireTariffs('renewTariffs','rDays','rAmount', updateRenewPreview);
+$('renewCancel').addEventListener('click',()=>$('renewModal').classList.remove('open'));
+$('renewModal').addEventListener('click',e=>{if(e.target===$('renewModal'))$('renewModal').classList.remove('open');});
+$('renewOk').addEventListener('click', async()=>{
+  const slot = getSlotDoc(renewNum);
+  if (!slot) return;
+  const days = parseInt($('rDays').value);
+  const amount = parseFloat($('rAmount').value)||0;
+  const note = $('rNote').value.trim();
+  if (!days || days<1) { showToast('Укажите количество дней (или выберите тариф)','error'); return; }
+  if (amount<0) { showToast('Сумма не может быть отрицательной','error'); return; }
+  const newEndDate = computeRenewedEndDate(slot, days);
+  $('renewModal').classList.remove('open');
+  const payment = {amount, date:Date.now(), endDate:newEndDate, player:slot.player, note: note||'Продление'};
+  addHist('renew', `Продлена палатка #${slot.tentNum} (${slot.player||'?'})`, `${fmtDate(slot.endDate)} → ${fmtDate(newEndDate)} · +${days} дн. · 🛢 ${amount}${note?' · '+note:''}`);
+  await saveSlot(slot, {endDate:newEndDate}, payment);
+  showToast('Продление записано','success');
+  renewNum = null;
+});
+
+// ─── ИЗМЕНИТЬ (без суммы) ──────────────────────────────
+let editNum = null, eSelLabel='none';
+function openEdit(n) {
+  const slot = getSlotDoc(n);
+  if (!slot || !isOccupied(slot)) return;
+  editNum = n;
+  $('editTentNumLabel').textContent = `#${n}`;
+  $('ePlayer').value = slot.player||'';
+  $('eTgId').value = slot.tgId||'';
+  $('eDate').value = slot.endDate||'';
+  $('eNote').value = slot.note||'';
+  eSelLabel = slot.label||'none';
+  buildPickerInto('eLblPicker', eSelLabel, v=>{ eSelLabel=v; buildPickerInto('eLblPicker', eSelLabel, arguments.callee); });
+  $('editModal').classList.add('open');
+  setTimeout(()=>$('ePlayer').focus(),120);
+}
+$('editCancel').addEventListener('click',()=>$('editModal').classList.remove('open'));
+$('editModal').addEventListener('click',e=>{if(e.target===$('editModal'))$('editModal').classList.remove('open');});
+$('editOk').addEventListener('click', async()=>{
+  const slot = getSlotDoc(editNum);
+  if (!slot) return;
+  const player = $('ePlayer').value.trim();
+  const tgIdRaw = $('eTgId').value.trim();
+  const tgId = tgIdRaw ? parseInt(tgIdRaw, 10) : null;
+  const endDate = $('eDate').value;
+  const note = $('eNote').value.trim();
+  if (!player || !endDate) { showToast('Заполните ник и дату окончания','error'); return; }
+  if (tgIdRaw && !tgId) { showToast('Telegram ID должен быть числом','error'); return; }
+  $('editModal').classList.remove('open');
+  const ch=[];
+  if (slot.player!==player) ch.push(`ник: ${slot.player}→${player}`);
+  if (slot.endDate!==endDate) ch.push(`дата: ${fmtDate(slot.endDate)}→${fmtDate(endDate)}`);
+  if ((slot.label||'none')!==eSelLabel) ch.push('метка изменена');
+  addHist('edit', `Изменена палатка #${editNum} (${player})`, ch.join(', ')||'без изменений');
+  await saveSlot(slot, {player, tgId, label:eSelLabel, endDate, note});
+  showToast('Изменения сохранены','success');
+  editNum = null;
+});
+
+// ─── ОСВОБОДИТЬ ПАЛАТКУ ────────────────────────────────
+// Сбрасывает текущего арендатора и накопленный долг; отсчёт для следующего игрока
+// начнётся заново с момента заселения. История платежей сохраняется для отчётов.
+let releaseNum = null;
+function openRelease(n) {
+  const slot = getSlotDoc(n);
+  if (!slot || !isOccupied(slot)) return;
+  releaseNum = n;
+  const paid = tentTotalPaid(slot);
+  $('releaseMsg').innerHTML = `Палатка <strong>#${n}</strong> (${slot.player||'?'}) станет свободной, а накопленный долг/срок будет сброшен.${paid>0?` Вся история платежей (🛢 ${paid.toLocaleString('ru-RU')} нефти) останется в отчётах и статистике.`:''}`;
+  $('releaseReason').value='';
+  $('releaseModal').classList.add('open');
+}
+$('releaseCancel').addEventListener('click',()=>$('releaseModal').classList.remove('open'));
+$('releaseModal').addEventListener('click',e=>{if(e.target===$('releaseModal'))$('releaseModal').classList.remove('open');});
+$('releaseOk').addEventListener('click', async()=>{
+  const slot = getSlotDoc(releaseNum);
+  if (!slot) return;
+  const reason = $('releaseReason').value.trim();
+  $('releaseModal').classList.remove('open');
+  addHist('release', `Освобождена палатка #${releaseNum} (${slot.player||'?'})`, reason||'Без указания причины');
+  await saveSlot(slot, {occupied:false, player:'', tgId:null, label:'none', note:'', endDate:null, amount:0});
+  showToast(`Палатка #${releaseNum} освобождена`,'info');
+  releaseNum = null;
+});
+
+// ─── МАССОВОЕ ПРОДЛЕНИЕ ────────────────────────────────
+$('btnBulkExtend').addEventListener('click',()=>{
+  if(!selected.size){showToast('Ничего не выбрано','error');return;}
+  const items=[...selected].map(n=>getSlotDoc(n)).filter(t=>t&&isOccupied(t));
+  $('bulkExtList').innerHTML=items.map(t=>`<div class="bulk-item"><span style="color:var(--text-muted)">#${t.tentNum}</span><span style="font-weight:700">${t.player||'?'}</span><span style="margin-left:auto;color:var(--text-muted)">${fmtDate(t.endDate)}</span></div>`).join('');
+  $('bulkDays').value=''; $('bulkAmount').value='';
+  document.querySelectorAll('#bulkTariffs .tariff-btn').forEach(b=>b.classList.remove('active'));
+  $('bulkExtModal').classList.add('open');
+});
+$('bulkExtCancel').addEventListener('click',()=>$('bulkExtModal').classList.remove('open'));
+$('bulkExtModal').addEventListener('click',e=>{if(e.target===$('bulkExtModal'))$('bulkExtModal').classList.remove('open');});
+wireTariffs('bulkTariffs','bulkDays','bulkAmount', ()=>{});
+$('bulkExtOk').addEventListener('click',async()=>{
+  const days=parseInt($('bulkDays').value);
+  const amount=parseFloat($('bulkAmount').value)||0;
+  if(!days||days<1){showToast('Укажите количество дней','error');return;}
+  if(amount<0){showToast('Сумма не может быть отрицательной','error');return;}
+  $('bulkExtModal').classList.remove('open');
+  const items=[...selected].map(n=>getSlotDoc(n)).filter(t=>t&&isOccupied(t));
+  for(const slot of items){
+    const newEndDate = computeRenewedEndDate(slot, days);
+    const payment = {amount, date:Date.now(), endDate:newEndDate, player:slot.player, note:'Массовое продление'};
+    await saveSlot(slot, {endDate:newEndDate}, payment);
+  }
+  addHist('bulk',`Массовое продление ${items.length} палаток на ${days} дн.${amount>0?' · 🛢 '+amount+' с каждого':''}`,items.map(t=>`#${t.tentNum} ${t.player||'?'}`).join(', '));
+  showToast(`Продлено ${items.length} палаток на ${days} дней`,'success');
+  exitSelect();
+});
+
+// ─── МАССОВОЕ ОСВОБОЖДЕНИЕ ──────────────────────────────
+$('btnBulkRelease').addEventListener('click',()=>{
+  if(!selected.size){showToast('Ничего не выбрано','error');return;}
+  $('bulkReleaseMsg').innerHTML=`Вы собираетесь освободить <strong>${selected.size}</strong> палаток. Накопленный срок/долг по ним будет сброшен, но история платежей останется в отчётах.`;
+  $('bulkReleaseModal').classList.add('open');
+});
+$('bulkReleaseCancel').addEventListener('click',()=>$('bulkReleaseModal').classList.remove('open'));
+$('bulkReleaseModal').addEventListener('click',e=>{if(e.target===$('bulkReleaseModal'))$('bulkReleaseModal').classList.remove('open');});
+$('bulkReleaseOk').addEventListener('click',async()=>{
+  $('bulkReleaseModal').classList.remove('open');
+  const items=[...selected].map(n=>getSlotDoc(n)).filter(t=>t&&isOccupied(t));
+  for(const slot of items){
+    await saveSlot(slot, {occupied:false, player:'', tgId:null, label:'none', note:'', endDate:null, amount:0});
+  }
+  addHist('bulk',`Массовое освобождение ${items.length} палаток`,items.map(t=>`#${t.tentNum} ${t.player||'?'}`).join(', '));
+  showToast(`Освобождено палаток: ${items.length}`,'info');
+  exitSelect();
+});
+
+// ─── FILTER / SEARCH / SORT ───────────────────────────
+document.querySelectorAll('.ftab').forEach(btn=>
+  btn.addEventListener('click',()=>{
+    document.querySelectorAll('.ftab').forEach(b=>b.classList.remove('active'));
+    btn.classList.add('active');
+    currentFilter=btn.dataset.filter;
+    renderAll();
+  })
+);
+$('searchInput').addEventListener('input',e=>{searchQ=e.target.value;renderAll();});
+$('sortSelect').addEventListener('change',e=>{sortKey=e.target.value;renderAll();});
+
+// ─── NAV ─────────────────────────────────────────────
+document.querySelectorAll('.nav-tab').forEach(btn=>
+  btn.addEventListener('click',()=>{
+    document.querySelectorAll('.nav-tab').forEach(b=>b.classList.remove('active'));
+    document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
+    btn.classList.add('active');
+    $('page-'+btn.dataset.page).classList.add('active');
+    if(btn.dataset.page==='stats') renderStats();
+    if(btn.dataset.page==='payments') renderPayments();
+    if(btn.dataset.page==='history') renderHistPage();
+  })
+);
+
+// ─── TOAST ───────────────────────────────────────────
+function showToast(msg,type='info',action=null){
+  const el=document.createElement('div');
+  el.className=`toast-item ${type}`;
+  const span=document.createElement('span');
+  span.textContent=msg;
+  el.appendChild(span);
+  if(action){
+    const btn=document.createElement('button');
+    btn.className='toast-action';
+    btn.textContent=action.label;
+    btn.addEventListener('click',()=>{action.onClick();el.remove();});
+    el.appendChild(btn);
+  }
+  $('toast').appendChild(el);
+  setTimeout(()=>el.remove(),action?7000:3500);
+}
+
+setInterval(renderAll,60000);
+
+// ─── ГОРЯЧИЕ КЛАВИШИ ───────────────────────────────────
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') { document.querySelectorAll('.modal-backdrop.open').forEach(m => m.classList.remove('open')); }
+  if (e.key === '/' && document.activeElement.tagName !== 'INPUT' && document.activeElement.tagName !== 'TEXTAREA') {
+    e.preventDefault(); $('searchInput').focus();
+  }
+});
+
+// ─── ПЕРЕНОС ЛОКАЛЬНЫХ ДАННЫХ (localStorage → Firestore) ────
+// Раньше, если Firebase не подключался, программа тихо писала палатки только
+// в localStorage этого браузера. Эта секция находит такие «застрявшие» палатки
+// и даёт админу вручную перенести их в общую базу — без слепого перезаписывания
+// того, что уже актуально в Firestore (могло измениться через бота/Mini App).
+function loadLocalTents() {
+  try { return JSON.parse(localStorage.getItem('tz_tents') || '{}'); } catch { return {}; }
+}
+function localTentIsOccupied(t) {
+  if (!t) return false;
+  if (t.closed) return false;
+  if (typeof t.occupied === 'boolean') return t.occupied;
+  return !!(t.player && t.endDate);
+}
+let migrateSelections = {};
+function checkForLocalData() {
+  const local = loadLocalTents();
+  const occupiedLocal = Object.values(local).filter(localTentIsOccupied);
+  const btn = $('migrateBtn');
+  if (occupiedLocal.length) {
+    btn.style.display = 'inline-flex';
+    btn.textContent = `🗄 Локальных палаток: ${occupiedLocal.length}`;
+  } else {
+    btn.style.display = 'none';
+  }
+}
+function openMigrateModal() {
+  const local = loadLocalTents();
+  const occupiedLocal = Object.values(local).filter(localTentIsOccupied).sort((a,b)=>a.tentNum-b.tentNum);
+  migrateSelections = {};
+  const list = $('migrateList');
+  if (!occupiedLocal.length) {
+    list.innerHTML = `<div style="text-align:center;padding:30px;color:var(--text-muted)">Локальных данных не найдено — похоже, всё уже в общей базе.</div>`;
+  } else {
+    list.innerHTML = occupiedLocal.map(lt => {
+      const remote = getSlotDoc(lt.tentNum);
+      const remoteOccupied = isOccupied(remote);
+      const conflict = remoteOccupied && (remote.player !== lt.player || remote.endDate !== lt.endDate);
+      migrateSelections[lt.tentNum] = !conflict; // по умолчанию переносим только то, что не конфликтует
+      return `<div style="background:var(--bg-card-h);border:1px solid ${conflict?'var(--orange)':'var(--border)'};border-radius:var(--radius-sm);padding:12px 14px">
+        <label style="display:flex;align-items:flex-start;gap:10px;cursor:pointer">
+          <input type="checkbox" data-migrate-num="${lt.tentNum}" ${migrateSelections[lt.tentNum]?'checked':''} style="margin-top:3px">
+          <div style="flex:1">
+            <div style="font-weight:700;font-family:'Rajdhani',sans-serif;font-size:15px">
+              Палатка #${lt.tentNum} ${conflict ? '<span style="color:var(--orange);font-size:11px;font-weight:800">⚠ КОНФЛИКТ</span>' : ''}
+            </div>
+            <div style="font-size:12px;color:var(--text-dim);margin-top:4px">
+              <b>Локально:</b> ${lt.player||'—'} · до ${fmtDate(lt.endDate)}
+            </div>
+            ${remoteOccupied ? `<div style="font-size:12px;color:var(--text-muted);margin-top:2px">
+              <b>Сейчас в базе:</b> ${remote.player||'—'} · до ${fmtDate(remote.endDate)}
+            </div>` : `<div style="font-size:12px;color:var(--green);margin-top:2px">В базе эта палатка свободна — перенос безопасен</div>`}
+          </div>
+        </label>
+      </div>`;
+    }).join('');
+    list.querySelectorAll('[data-migrate-num]').forEach(cb => {
+      cb.addEventListener('change', () => { migrateSelections[cb.dataset.migrateNum] = cb.checked; });
+    });
+  }
+  $('migrateModal').classList.add('open');
+}
+$('migrateBtn').addEventListener('click', openMigrateModal);
+$('migrateCancel').addEventListener('click', () => $('migrateModal').classList.remove('open'));
+$('migrateModal').addEventListener('click', e => { if (e.target === $('migrateModal')) $('migrateModal').classList.remove('open'); });
+$('migrateApply').addEventListener('click', async () => {
+  const local = loadLocalTents();
+  const toMigrate = Object.keys(migrateSelections).filter(n => migrateSelections[n]);
+  if (!toMigrate.length) { showToast('Ничего не отмечено','error'); return; }
+  $('migrateApply').disabled = true;
+  $('migrateApply').textContent = 'Переносим...';
+  let done = 0;
+  for (const numStr of toMigrate) {
+    const n = Number(numStr);
+    const lt = Object.values(local).find(t => Number(t.tentNum) === n);
+    if (!lt) continue;
+    const remote = getSlotDoc(n);
+    const data = {
+      tentNum: n, occupied: true, player: lt.player || '', endDate: lt.endDate || null,
+      note: lt.note || '', label: lt.label || 'none', amount: lt.amount || 0,
+      payments: lt.payments && lt.payments.length ? lt.payments : (lt.amount ? [{amount:lt.amount, date: lt.createdAt || Date.now(), endDate: lt.endDate, player: lt.player, note:'Перенесено из локальных данных'}] : []),
+      updatedAt: Date.now(),
+    };
+    try {
+      if (remote && remote.id) {
+        await window._fbUpdate(remote.id, data);
+      } else {
+        await window._fbAdd({ ...data, createdAt: lt.createdAt || Date.now() });
+      }
+      done++;
+    } catch (e) {
+      console.error(`Ошибка переноса палатки #${n}:`, e);
+    }
+  }
+  addHist('bulk', `Перенесено локальных палаток: ${done}`, toMigrate.join(', '));
+  showToast(`Перенесено палаток: ${done} из ${toMigrate.length}`, 'success');
+  $('migrateApply').disabled = false;
+  $('migrateApply').textContent = 'Перенести отмеченные';
+  $('migrateModal').classList.remove('open');
+  checkForLocalData();
+});
+
+// ─── INIT ─────────────────────────────────────────────
+(async()=>{
+  const ok=await initFirebase();
+  const dot = $('dbStatusDot');
+  const text = $('dbStatusText');
+  const banner = $('offlineBanner');
+  if (ok) {
+    text.textContent = 'LIVE · FIREBASE';
+  } else {
+    initLocal();
+    renderAll();
+    dot.classList.add('offline');
+    $('dbStatusBadge').classList.add('offline');
+    text.textContent = 'ОФЛАЙН · ЛОКАЛЬНО';
+    banner.style.display = 'block';
+    console.error('Firebase недоступен — менеджер работает в изолированном локальном режиме, изменения не синхронизируются с ботом/Mini App/Google Sheets.');
+  }
+  setTimeout(()=>{
+    $('loader').classList.add('hidden');
+    setTimeout(checkAlerts,700);
+  },1300);
+})();
+</script>
+</body>
+</html>
