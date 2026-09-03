@@ -31,9 +31,21 @@ import logging
 import sqlite3
 import threading
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from config import FIREBASE_SERVICE_ACCOUNT_FILE
+
+# Часовой пояс МСК (UTC+3) — все даты окончания аренды считаются по нему, а не по UTC,
+# т.к. пользователю везде показывается "до ХХ.ХХ.ХХХХ 23:59:59 (МСК)". Раньше здесь
+# использовался datetime.utcnow(), из-за чего в промежутке 00:00–02:59 по МСК (когда
+# в UTC ещё "вчера") аренда/продление считались на календарный день короче, чем должны.
+MSK_TZ = timezone(timedelta(hours=3))
+
+
+def _msk_now_naive() -> datetime:
+    """Текущее время в МСК без информации о часовом поясе (naive) — чтобы формат
+    совпадал с уже сохранёнными в Firestore/SQLite строками дат."""
+    return datetime.now(MSK_TZ).replace(tzinfo=None)
 
 _app = None
 _db = None
@@ -351,6 +363,63 @@ async def get_pending_rental_requests() -> list:
     return await asyncio.to_thread(_get_pending_rental_requests_sync)
 
 
+def _create_tent_claim_sync(data: dict) -> str:
+    _ensure_init()
+    if _db is None:
+        raise RuntimeError("Firestore не настроен или недоступен")
+    now_ms = int(time.time() * 1000)
+    ref = _db.collection("tent_claim_requests").add({**data, "status": "pending", "createdAt": now_ms})[1]
+    return ref.id
+
+
+async def create_tent_claim(data: dict) -> str:
+    return await asyncio.to_thread(_create_tent_claim_sync, data)
+
+
+def _get_pending_tent_claims_sync() -> list:
+    _ensure_init()
+    if _db is None:
+        return []
+    from google.cloud.firestore_v1.base_query import FieldFilter
+    return [{"id": doc.id, **(doc.to_dict() or {})}
+            for doc in _db.collection("tent_claim_requests").where(filter=FieldFilter("status", "==", "pending")).stream()]
+
+
+async def get_pending_tent_claims() -> list:
+    return await asyncio.to_thread(_get_pending_tent_claims_sync)
+
+
+def _resolve_tent_claim_sync(request_id: str, approve: bool, admin_id: int, reason: str = ""):
+    _ensure_init()
+    if _db is None:
+        raise RuntimeError("Firestore не настроен или недоступен")
+    request_ref = _db.collection("tent_claim_requests").document(request_id)
+    request_snapshot = request_ref.get()
+    request = request_snapshot.to_dict() or {}
+    if request.get("status") != "pending":
+        return request
+    status = "approved" if approve else "rejected"
+    now_ms = int(time.time() * 1000)
+    if approve:
+        tent_ref = _find_tent_doc_sync(int(request["tentNum"]))
+        if tent_ref is None or not (tent_ref.to_dict() or {}).get("occupied"):
+            raise ValueError("Палатка свободна или не найдена")
+        tent_data = tent_ref.to_dict() or {}
+        if tent_data.get("tgId") and int(tent_data["tgId"]) != int(request["requesterTgId"]):
+            raise ValueError("У палатки уже есть владелец")
+        for other_tent in _db.collection("tents").stream():
+            other_data = other_tent.to_dict() or {}
+            if int(other_data.get("tentNum") or 0) != int(request["tentNum"]) and int(other_data.get("tgId") or 0) == int(request["requesterTgId"]):
+                raise ValueError("У этого Telegram уже есть привязанная палатка")
+        tent_ref.reference.update({"tgId": int(request["requesterTgId"]), "ownerUsername": request.get("requesterUsername", ""), "ownerMinecraftNick": request.get("minecraftNick", ""), "updatedAt": now_ms})
+    request_ref.update({"status": status, "resolvedAt": now_ms, "resolvedByTgId": admin_id, "reason": reason})
+    return request
+
+
+async def resolve_tent_claim(request_id: str, approve: bool, admin_id: int, reason: str = ""):
+    return await asyncio.to_thread(_resolve_tent_claim_sync, request_id, approve, admin_id, reason)
+
+
 def _get_pending_support_requests_sync() -> list:
     _ensure_init()
     if _db is None:
@@ -492,8 +561,47 @@ def _make_payment(amount: int, end_date: str, note: str, player: str = None) -> 
     }
 
 
+def _record_rental_history_sync(tent_id: int, player: str, amount: int, days: int,
+                                end_date: str, operation_type: str = "renew",
+                                source: str = "bot", tg_id: int | None = None,
+                                photo_id: str | None = None, request_id: str | None = None,
+                                note: str = ""):
+    _ensure_init()
+    if _db is None:
+        raise RuntimeError("Firestore не настроен или недоступен")
+    operation_at = int(time.time() * 1000)
+    payload = {
+        "tentNum": int(tent_id),
+        "player": player or "",
+        "tgId": tg_id,
+        "amount": int(amount or 0),
+        "days": int(days or 0),
+        "endDate": end_date,
+        "operationType": operation_type,
+        "operationAt": operation_at,
+        "source": source,
+        "note": note,
+    }
+    if photo_id:
+        payload["photoId"] = photo_id
+    if request_id:
+        payload["requestId"] = request_id
+    _db.collection("rental_history").add(payload)
+
+
+async def record_rental_history(tent_id: int, player: str, amount: int, days: int,
+                                end_date: str, operation_type: str = "renew",
+                                source: str = "bot", tg_id: int | None = None,
+                                photo_id: str | None = None, request_id: str | None = None,
+                                note: str = ""):
+    await asyncio.to_thread(
+        _record_rental_history_sync, tent_id, player, amount, days, end_date,
+        operation_type, source, tg_id, photo_id, request_id, note,
+    )
+
+
 def _assign_tent_sync(tent_id: int, tg_id: int, nickname: str, days: int, price: int, note: str):
-    end_date = (datetime.utcnow() + timedelta(days=days)).strftime("%Y-%m-%d")
+    end_date = (_msk_now_naive() + timedelta(days=days)).strftime("%Y-%m-%d")
     payment = _make_payment(price, end_date, note, nickname) if price else None
     _write_payment_and_fields_sync(
         tent_id,
@@ -515,7 +623,7 @@ def _extend_tent_sync(tent_id: int, days: int, price: int, nickname: str, note: 
     data = doc.to_dict() if doc else {}
     end_date_str = data.get("endDate") if data else None
 
-    now = datetime.utcnow()
+    now = _msk_now_naive()
     if end_date_str:
         try:
             curr_end = datetime.strptime(end_date_str, "%Y-%m-%d")

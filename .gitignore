@@ -1,14 +1,13 @@
-# Секреты — никогда не коммитить
+
 tzmanager-*.json
 tzprograma-*.json
 config.py
 
-# Локальная база данных
 tents.db
 tents.db-wal
 tents.db-shm
 
-# Прочее
+
 __pycache__/
 *.pyc
 .env

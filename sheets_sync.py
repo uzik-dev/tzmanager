@@ -1,13 +1,18 @@
 import asyncio
 import logging
 import time
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 from config import (
     GOOGLE_SHEETS_SPREADSHEET_ID,
     GOOGLE_SERVICE_ACCOUNT_FILE,
     GOOGLE_SHEETS_TENTS_WORKSHEET,
 )
+
+# Часовой пояс МСК (UTC+3) — раньше колонка "Обновлено" писалась через datetime.now()
+# (локальное время сервера), из-за чего при хостинге бота не в МСК метка времени в
+# таблице расходилась с остальными датами в проекте (все они по МСК).
+MSK_TZ = timezone(timedelta(hours=3))
 
 HEADERS = [
     "Палатка №", "Статус", "Игрок", "Telegram ID",
@@ -99,7 +104,7 @@ async def sync_tent(tent_id: int, status: str, player: str, tg_id, end_date: str
         end_date or "—",
         last_payment if last_payment else "—",
         total_paid if total_paid else "—",
-        datetime.now().strftime("%d.%m.%Y %H:%M"),
+        datetime.now(MSK_TZ).strftime("%d.%m.%Y %H:%M"),
     ]
     try:
         await asyncio.to_thread(_upsert_row_sync, row, tent_id)

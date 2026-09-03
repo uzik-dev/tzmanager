@@ -115,11 +115,17 @@ def _batch_write_products_sync(sheet_name, products):
         worksheet.batch_update(updates)
 
 
-def _sync_sync():
+def _sync_sync(firestore_products: dict):
+    """Синхронная часть (работа с Google Sheets через gspread, которая не умеет в
+    asyncio) — только читает/пишет таблицы и решает, какие Firestore-операции
+    нужны. Сами Firestore-операции здесь больше не выполняются (раньше на каждый
+    товар вызывался отдельный asyncio.run(...), то есть создавался и уничтожался
+    новый event loop десятки раз за один проход синхронизации — теперь все
+    накопленные операции выполняются одним await в sync_products())."""
     if not GOOGLE_SHEETS_SPREADSHEET_ID or not GOOGLE_SERVICE_ACCOUNT_FILE:
-        return {"sources": 0, "products": 0}
+        return {"sources": 0, "products": 0, "ops": []}
 
-    firestore_products = {product["id"]: product for product in asyncio.run(firestore_sync.get_all_products())}
+    ops = []  # список (op_name, args) — выполняется асинхронно одним махом позже
     changed = 0
     source_count = 0
     pending_writes = {}
@@ -141,7 +147,7 @@ def _sync_sync():
                 pending_writes.setdefault(existing.get("sourceSheet"), []).append(existing)
                 product.update({k: existing.get(k, product[k]) for k in ("name", "quantity", "price", "available")})
             elif not existing or any(existing.get(key) != product.get(key) for key in ("name", "quantity", "price", "available", "tentNum")):
-                asyncio.run(firestore_sync.sync_product_from_sheet(product["id"], product))
+                ops.append(("sync_product_from_sheet", product["id"], dict(product)))
                 changed += 1
 
     for sheet_name, products in pending_writes.items():
@@ -153,23 +159,41 @@ def _sync_sync():
             write_succeeded = False
         if write_succeeded:
             for product in products:
-                asyncio.run(firestore_sync.mark_product_sheet_synced(product["id"], product.get("updatedAt", int(datetime.now().timestamp() * 1000))))
+                ops.append(("mark_product_sheet_synced", product["id"], product.get("updatedAt", int(datetime.now().timestamp() * 1000))))
 
     for product in firestore_products.values():
         if product.get("sourceRow") or not product.get("sourceSheet"):
             continue
         row = _write_product_sync(product)
         if row:
-            asyncio.run(firestore_sync.upsert_product(product["id"], {"sourceRow": row, "sourceGroup": 0}))
-            asyncio.run(firestore_sync.mark_product_sheet_synced(product["id"], product.get("updatedAt", int(datetime.now().timestamp() * 1000))))
+            ops.append(("upsert_product", product["id"], {"sourceRow": row, "sourceGroup": 0}))
+            ops.append(("mark_product_sheet_synced", product["id"], product.get("updatedAt", int(datetime.now().timestamp() * 1000))))
             changed += 1
 
-    return {"sources": source_count, "products": changed}
+    return {"sources": source_count, "products": changed, "ops": ops}
+
+
+async def _apply_ops(ops):
+    for op in ops:
+        try:
+            if op[0] == "sync_product_from_sheet":
+                _, product_id, product = op
+                await firestore_sync.sync_product_from_sheet(product_id, product)
+            elif op[0] == "mark_product_sheet_synced":
+                _, product_id, updated_at = op
+                await firestore_sync.mark_product_sheet_synced(product_id, updated_at)
+            elif op[0] == "upsert_product":
+                _, product_id, data = op
+                await firestore_sync.upsert_product(product_id, data)
+        except Exception:
+            logging.exception("Ошибка применения Firestore-операции %s для товара", op[0])
 
 
 async def sync_products():
     try:
-        result = await asyncio.to_thread(_sync_sync)
+        firestore_products = {product["id"]: product for product in await firestore_sync.get_all_products()}
+        result = await asyncio.to_thread(_sync_sync, firestore_products)
+        await _apply_ops(result["ops"])
         logging.info("Синхронизация товаров: листов %s, изменений %s", result["sources"], result["products"])
     except Exception:
         logging.exception("Ошибка синхронизации товаров с Google Sheets")

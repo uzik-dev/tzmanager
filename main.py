@@ -2,6 +2,7 @@ import asyncio
 import logging
 import re
 import os
+import time
 import pandas as pd
 from datetime import datetime, timedelta, timezone
 from aiogram import Bot, Dispatcher, F, types
@@ -30,6 +31,7 @@ dp = Dispatcher(storage=MemoryStorage())
 
 # Часовой пояс МСК (UTC+3)
 MSK_TZ = timezone(timedelta(hours=3))
+REPORT_START_DATE = datetime(2026, 9, 1, tzinfo=MSK_TZ)
 
 
 # === СИСТЕМА ЛОГИРОВАНИЯ ОШИБОК В TELEGRAM-КАНАЛ ===
@@ -253,7 +255,7 @@ async def get_all_tents_list():
     return await firestore_sync.get_all_tents()
 
 
-async def _record_payment(tent_id, nickname, price, days, photo_id, is_document):
+async def _record_payment(tent_id, nickname, price, days, photo_id, is_document, operation_type="renew"):
     """Канонический реестр платежей — коллекция Firestore 'bot_payments'
     (когда-то писала в SQLite, отсюда историческое имя функции при переносе)."""
     today = datetime.now(MSK_TZ).strftime("%d.%m.%Y %H:%M")
@@ -262,12 +264,18 @@ async def _record_payment(tent_id, nickname, price, days, photo_id, is_document)
         "tent_id": tent_id, "nickname": nickname, "price": price, "days": days,
         "photo_id": photo_id, "pay_date": today, "is_document": int(is_document),
     })
+    tent = await firestore_sync.get_tent_data(tent_id) or {}
+    await firestore_sync.record_rental_history(
+        tent_id, nickname, price, days, tent.get("endDate") or "",
+        operation_type=operation_type,
+        source="bot", tg_id=tent.get("tgId"), photo_id=photo_id,
+    )
 
 
 async def assign_tent_db(tent_id, tg_id, nickname, days=7, price=0, photo_id=None, is_document=False):
     end_date = await firestore_sync.assign_tent(tent_id, tg_id, nickname, days=days, price=price)
     if price:
-        await _record_payment(tent_id, nickname, price, days, photo_id, is_document)
+        await _record_payment(tent_id, nickname, price, days, photo_id, is_document, "rent")
     return end_date
 
 
@@ -297,10 +305,16 @@ def tent_status_label(end_date_str) -> str:
     return f"🟢 Активна (осталось {days_left} дн.)"
 
 
-async def sync_tent_row(tent_id: int):
+async def sync_tent_row(tent_id: int, payments_by_tent: dict = None):
     """Подтягивает текущее состояние палатки (из Firestore) и её платежей и
     отправляет строку в Google-таблицу реестра. Вызывается после КАЖДОГО изменения
-    палатки — не блокирует и не ломает основной функционал бота при сбое."""
+    палатки — не блокирует и не ломает основной функционал бота при сбое.
+
+    payments_by_tent: если вызывающий код уже прочитал всю коллекцию bot_payments
+    (например, при массовой синхронизации всех палаток) — передаём готовый словарь
+    {tent_id: [платежи]}, чтобы НЕ вычитывать всю коллекцию заново на каждую палатку.
+    Раньше это не было предусмотрено, и цикл по 20 палаткам читал всю историю
+    платежей 20 раз подряд при каждом запуске — это и выжигало квоту Firestore."""
     if not sheets_sync.is_configured():
         return
     tent = await get_tent(tent_id)
@@ -308,9 +322,13 @@ async def sync_tent_row(tent_id: int):
         return
     _, tg_id, nickname, end_date = tent
 
-    all_payments = await firestore_sync.list_bot_documents("bot_payments")
-    payments = [item for item in all_payments if int(item.get("tent_id", 0)) == int(tent_id)]
-    payments.sort(key=lambda item: item.get("id", ""))
+    if payments_by_tent is None:
+        all_payments = await firestore_sync.list_bot_documents("rental_history")
+        payments = [{"price": item.get("amount", 0), "operationAt": item.get("operationAt", 0)}
+                    for item in all_payments if int(item.get("tentNum", 0)) == int(tent_id)]
+    else:
+        payments = payments_by_tent.get(int(tent_id), [])
+    payments.sort(key=lambda item: item.get("operationAt", 0))
     last_payment = payments[-1].get("price") if payments else None
     total_paid = sum(int(item.get("price") or 0) for item in payments) or None
 
@@ -330,7 +348,7 @@ async def extend_tent_db(tent_id, days, price, photo_id, nickname, is_document=F
     теперь живёт в firestore_sync.extend_tent (ровно та же формула, что была здесь)."""
     new_end = await firestore_sync.extend_tent(tent_id, days, price, nickname)
     if price:
-        await _record_payment(tent_id, nickname, price, days, photo_id, is_document)
+        await _record_payment(tent_id, nickname, price, days, photo_id, is_document, "renew")
     return new_end
 
 
@@ -354,6 +372,10 @@ class EditDateState(StatesGroup):
 class EditStatsState(StatesGroup):
     waiting_for_oil = State()
     waiting_for_deals = State()
+
+class TentClaimState(StatesGroup):
+    waiting_for_tent = State()
+    waiting_for_nickname = State()
 
 class DeleteUserState(StatesGroup):
     waiting_for_reason = State()
@@ -470,7 +492,7 @@ async def cmd_start(message: types.Message, state: FSMContext):
     if MINIAPP_URL:
         kb.button(text="🚀 Открыть приложение", web_app=types.WebAppInfo(url=MINIAPP_URL))
     await message.answer(
-        "👋 Добро пожаловать в Торговую Зону!\n\nАренда палаток, товары, лицензии и связь с администрацией — всё в приложении.",
+        "👋 Добро пожаловать в Торговую Зону!\n\nАренда палаток, товары, лицензии и связь с администрацией — всё в приложении.\n\nЕсли вы уже владелец палатки, но она не привязана к Telegram, используйте /claim.",
         reply_markup=kb.as_markup(),
     )
 
@@ -553,23 +575,57 @@ async def run_broadcast(callback: types.CallbackQuery, state: FSMContext):
     await state.clear()
 
 
-# === 📦 АВТО-БЭКАП БАЗЫ В ЛОГ-КАНАЛ КАЖДЫЕ 3 ДНЯ ===
+# === 📦 АВТО-БЭКАП ДАННЫХ В ЛОГ-КАНАЛ КАЖДЫЕ 3 ДНЯ ===
+# ВАЖНО: раньше эта функция бэкапила локальный файл tents.db, но фактическое
+# рабочее хранилище (палатки, платежи, пользователи, ЧС) давно переехало в
+# Firestore — sqlite используется только один раз при первом запуске как
+# источник миграции. Бэкапить нужно именно Firestore, поэтому теперь сюда
+# выгружаются актуальные коллекции в единый JSON-файл. Также раньше эта
+# функция вообще не была подключена к планировщику (см. main()) — джоб
+# добавлен ниже.
 async def send_db_backup():
-    if os.path.exists("tents.db") and LOG_CHANNEL_ID:
+    if not LOG_CHANNEL_ID:
+        return
+    try:
+        import json
+
+        payload = {
+            "generated_at": datetime.now(MSK_TZ).strftime("%d.%m.%Y %H:%M:%S"),
+            "tents": [
+                {"tent_id": t_id, "tg_id": tg_id, "nickname": nick, "end_date": end}
+                for t_id, tg_id, nick, end in await get_all_tents_list()
+            ],
+            "users": [
+                {"tg_id": u_id, "username": uname, "nickname": nick}
+                for u_id, uname, nick in await get_all_users()
+            ],
+            "payments": await firestore_sync.list_bot_documents("bot_payments"),
+            "blacklist": await firestore_sync.list_bot_documents("bot_blacklist"),
+        }
+
+        backup_file_name = f"backup_{datetime.now(MSK_TZ).strftime('%Y%m%d_%H%M%S')}.json"
+        with open(backup_file_name, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2, default=str)
+
         try:
-            db_file = FSInputFile("tents.db")
+            backup_file = FSInputFile(backup_file_name)
             await bot.send_document(
                 chat_id=LOG_CHANNEL_ID,
-                document=db_file,
+                document=backup_file,
                 caption=(
-                    f"📦 <b>АВТОМАТИЧЕСКИЙ БЭКАП БАЗЫ ДАННЫХ</b>\n\n"
+                    f"📦 <b>АВТОМАТИЧЕСКИЙ БЭКАП ДАННЫХ (Firestore)</b>\n\n"
                     f"📅 Дата: {datetime.now(MSK_TZ).strftime('%d.%m.%Y %H:%M:%S')} (МСК)\n"
+                    f"⛺ Палаток: {len(payload['tents'])} | 👥 Игроков: {len(payload['users'])} | "
+                    f"🧾 Платежей: {len(payload['payments'])}\n"
                     f"<i>Резервная копия формируется каждые 3 дня.</i>"
                 ),
                 parse_mode="HTML"
             )
-        except Exception as e:
-            logging.error(f"Ошибка бэкапа: {e}")
+        finally:
+            if os.path.exists(backup_file_name):
+                os.remove(backup_file_name)
+    except Exception as e:
+        logging.error(f"Ошибка бэкапа: {e}")
 
 
 # === 🔔 АВТОМАТИЧЕСКИЕ НАПОМИНАНИЯ ИГРОКАМ В ЛС (В 12:00 МСК) ===
@@ -603,6 +659,34 @@ async def check_tent_expirations():
                 await send_log(f"⏰ <b>Напоминание отправлено:</b> Игроку <code>{nick}</code> (Палатка №{tent_id})")
         except Exception as e:
             logging.error(f"Ошибка отправки уведомления для {nick}: {e}")
+
+
+async def _renew_redirect(target_chat_id: int, tent_id: int):
+    """Общий текст+кнопка для перенаправления игрока в Mini App на продление
+    конкретной палатки. Продление всегда оформляется через Mini App (там же
+    оплата/чек), бот сам аренду не продлевает."""
+    kb = InlineKeyboardBuilder()
+    if MINIAPP_URL:
+        kb.button(text="🚀 Продлить в приложении", web_app=types.WebAppInfo(url=MINIAPP_URL))
+    await bot.send_message(
+        chat_id=target_chat_id,
+        text=(
+            f"💳 Чтобы продлить аренду <b>Палатки №{tent_id}</b>, откройте Mini App — "
+            f"там доступны все тарифы и оплата."
+        ),
+        reply_markup=kb.as_markup(),
+        parse_mode="HTML",
+    )
+
+
+@dp.callback_query(F.data.startswith("renew_"))
+async def renew_tent_callback(callback: types.CallbackQuery):
+    """Раньше кнопка 'Продлить сейчас' в напоминании об окончании аренды не имела
+    обработчика вообще — нажатие ничего не делало. Теперь она ведёт в Mini App,
+    где и происходит фактическое продление с оплатой."""
+    tent_id = int(callback.data.split("_", 1)[1])
+    await callback.answer()
+    await _renew_redirect(callback.message.chat.id, tent_id)
 
 
 # === ✏️ РУЧНОЕ ИЗМЕНЕНИЕ СРОКА АРЕНДЫ (АДМИН) ===
@@ -821,47 +905,47 @@ async def process_excel_export(callback: types.CallbackQuery):
     period_code = callback.data.split("_")[2]
     await callback.answer("📊 Формируем финансовую ведомость...")
 
-    all_payments = [
-        (item.get("tent_id"), item.get("nickname"), item.get("price"), item.get("days"), item.get("pay_date"))
-        for item in await firestore_sync.list_bot_documents("bot_payments")
-    ]
-    all_payments.sort(key=lambda item: item[4] or "")
+    all_payments = []
+    for item in await firestore_sync.list_bot_documents("rental_history"):
+        operation_at = int(item.get("operationAt") or 0)
+        pay_date = datetime.fromtimestamp(operation_at / 1000, MSK_TZ).strftime("%d.%m.%Y %H:%M") if operation_at else ""
+        all_payments.append((item.get("tentNum"), item.get("player"), item.get("amount", 0), item.get("days", 0), pay_date, operation_at))
+    all_payments.sort(key=lambda item: item[5])
 
     now_msk = datetime.now(MSK_TZ).replace(tzinfo=None)
 
     filtered_payments = []
     if period_code == "all":
-        period_title = "За всё время"
-        filtered_payments = all_payments
+        period_title = "С 01.09.2026"
+        start_ms = int(REPORT_START_DATE.timestamp() * 1000)
+        filtered_payments = [payment for payment in all_payments if payment[5] >= start_ms]
     else:
         days = int(period_code)
         period_title = f"За {days} дней ({days // 7} нед.)"
-        limit_date = now_msk - timedelta(days=days)
+        limit_ms = max(
+            int((now_msk - timedelta(days=days)).replace(tzinfo=MSK_TZ).timestamp() * 1000),
+            int(REPORT_START_DATE.timestamp() * 1000),
+        )
 
         for p in all_payments:
-            p_date_str = p[4]
-            try:
-                dt = datetime.strptime(p_date_str, "%d.%m.%Y %H:%M")
-                if dt >= limit_date:
-                    filtered_payments.append(p)
-            except Exception:
-                pass
+            if p[5] >= limit_ms:
+                filtered_payments.append(p)
 
     aggregated = {}
-    for tent_id, nick, price, days, pay_date in filtered_payments:
+    for tent_id, nick, price, days, pay_date, _operation_at in filtered_payments:
         key = (nick, tent_id)
         if key not in aggregated:
             aggregated[key] = {
                 "nickname": nick,
                 "tent_id": tent_id,
-                "total_days": days,
-                "total_oil": price,
+                "total_days": int(days or 0),
+                "total_oil": int(price or 0),
                 "last_date": pay_date,
                 "deals_count": 1
             }
         else:
-            aggregated[key]["total_days"] += days
-            aggregated[key]["total_oil"] += price
+            aggregated[key]["total_days"] += int(days or 0)
+            aggregated[key]["total_oil"] += int(price or 0)
             aggregated[key]["last_date"] = pay_date
             aggregated[key]["deals_count"] += 1
 
@@ -880,7 +964,13 @@ async def process_excel_export(callback: types.CallbackQuery):
             item["last_date"]
         ])
 
-    file_name = f"Nalogovay_Otchet_{datetime.now(MSK_TZ).strftime('%d_%m_%Y')}.xlsx"
+    # Имя файла включает user_id и метку времени с миллисекундами — иначе при
+    # параллельном экспорте двумя админами один процесс мог удалить (os.remove)
+    # файл, который в этот момент ещё читает/отправляет другой (гонка).
+    file_name = (
+        f"Nalogovay_Otchet_{datetime.now(MSK_TZ).strftime('%d_%m_%Y')}"
+        f"_{callback.from_user.id}_{int(datetime.now().timestamp() * 1000)}.xlsx"
+    )
 
     with pd.ExcelWriter(file_name, engine='openpyxl') as writer:
         columns = ["№ п/п", "Игровой Ник", "Палатка №", "Срок аренды (дней)", "Оплачено нефти (🛢️)", "Дата посл. операции"]
@@ -926,6 +1016,11 @@ async def process_excel_export(callback: types.CallbackQuery):
         worksheet['A4'].font = font_stat_label
         worksheet['D4'] = f"{total_oil_sum} 🛢️"
         worksheet['D4'].font = font_stat_val
+
+        worksheet['A6'] = "ГОСУДАРСТВУ (70%) / ОСТАТОК (30%):"
+        worksheet['A6'].font = font_stat_label
+        worksheet['D6'] = f"{total_oil_sum * 70 // 100} 🛢️ / {total_oil_sum * 30 // 100} 🛢️"
+        worksheet['D6'].font = font_stat_val
 
         worksheet['A5'] = "ВСЕГО АРЕНДАТОРОВ / ТРАНЗАКЦИЙ:"
         worksheet['A5'].font = font_stat_label
@@ -1054,7 +1149,7 @@ async def adm_blacklist_menu(callback: types.CallbackQuery):
 
     banned = []
     for item in await firestore_sync.list_bot_documents("bot_blacklist"):
-        user = await get_user_record(int(item.get("tg_id", 0)))
+        user = await get_user_record(int(item.get("tg_id", 0))) or {}
         banned.append((item.get("tg_id"), user.get("nickname"), user.get("username")))
 
     msg = "🚫 ЧЁРНЫЙ СПИСОК ИГРОКОВ:\n\n"
@@ -1133,12 +1228,21 @@ async def adm_stats_menu_cb(callback: types.CallbackQuery):
 
 @dp.callback_query(F.data.startswith("st_"))
 async def process_stats_period(callback: types.CallbackQuery):
+    # Раньше этот хендлер не проверял права вообще — доступ был защищён только тем,
+    # что кнопка не показывалась не-админам. Но callback_data можно вызвать напрямую,
+    # зная его строку, поэтому здесь нужна та же проверка, что и в show_stats_menu.
+    user_id = callback.from_user.id
+    if not (can_export_reports(user_id) or can_manage_tents(user_id) or user_id == VIEWER_ID):
+        await callback.answer("❌ Нет доступа к статистике.", show_alert=True)
+        return
+
     period_code = callback.data.split("_")[1]
 
     users_count = len(await firestore_sync.list_bot_documents("bot_users"))
+    history = await firestore_sync.list_bot_documents("rental_history")
     all_payments = [
-        (item.get("price", 0), item.get("pay_date", ""))
-        for item in await firestore_sync.list_bot_documents("bot_payments")
+        (item.get("amount", 0), item.get("operationAt", 0))
+        for item in history
     ]
 
     all_tents = await get_all_tents_list()
@@ -1151,23 +1255,21 @@ async def process_stats_period(callback: types.CallbackQuery):
     now_msk = datetime.now(MSK_TZ).replace(tzinfo=None)
 
     if period_code == "all":
-        period_title = "За всё время"
+        period_title = "С 01.09.2026"
         for price, p_date in all_payments:
-            total_earned += price
-            total_deals += 1
+            if int(p_date or 0) >= int(REPORT_START_DATE.timestamp() * 1000):
+                total_earned += int(price or 0)
+                total_deals += 1
     else:
         days = int(period_code)
         period_title = f"За {days} дней"
         limit_date = now_msk - timedelta(days=days)
 
-        for price, p_date in all_payments:
-            try:
-                dt = datetime.strptime(p_date, "%d.%m.%Y %H:%M")
-                if dt >= limit_date:
-                    total_earned += price
-                    total_deals += 1
-            except Exception:
-                pass
+        limit_ms = max(int(limit_date.replace(tzinfo=MSK_TZ).timestamp() * 1000), int(REPORT_START_DATE.timestamp() * 1000))
+        for price, operation_at in all_payments:
+            if int(operation_at or 0) >= limit_ms:
+                total_earned += int(price or 0)
+                total_deals += 1
 
     oil_off, deals_off = await get_stats_offsets()
     total_earned = max(0, total_earned + oil_off)
@@ -1186,6 +1288,8 @@ async def process_stats_period(callback: types.CallbackQuery):
     msg = (
         f"📊 <b>ОТЧЁТ СТАТИСТИКИ ({period_title.upper()}):</b>\n\n"
         f"🛢️ Собрано нефти: <b>{total_earned} 🛢️</b>\n"
+        f"🏛️ Государству 70%: <b>{total_earned * 70 // 100} 🛢️</b>\n"
+        f"🏕️ Остаётся 30%: <b>{total_earned * 30 // 100} 🛢️</b>\n"
         f"🧾 Сделок/Продлений: <b>{total_deals}</b>\n"
         f"⛺ Занято палаток: <b>{occupied_count} из 20</b> (Свободно: {20 - occupied_count})\n"
         f"👥 Всего зарегистрировано игроков: <b>{users_count}</b>\n"
@@ -1234,9 +1338,11 @@ async def show_history_photos(callback: types.CallbackQuery):
     period = parts[3]
 
     rows = [
-        (item.get("nickname"), item.get("price"), item.get("days"), item.get("photo_id"), item.get("pay_date"), item.get("is_document", 0))
-        for item in await firestore_sync.list_bot_documents("bot_payments")
-        if int(item.get("tent_id", 0)) == tent_id
+        (item.get("player"), item.get("amount"), item.get("days"), item.get("photoId"),
+         datetime.fromtimestamp(int(item.get("operationAt") or 0) / 1000, MSK_TZ).strftime("%d.%m.%Y %H:%M"),
+         0)
+        for item in await firestore_sync.list_bot_documents("rental_history")
+        if int(item.get("tentNum", 0)) == tent_id
     ]
     rows.sort(key=lambda row: row[4] or "", reverse=True)
 
@@ -1436,6 +1542,9 @@ async def process_del_user_start(callback: types.CallbackQuery, state: FSMContex
 
     user_id = int(callback.data.split("_")[2])
     row = await get_user_record(user_id)
+    if not row:
+        await callback.answer("❌ Игрок не найден в базе (возможно, уже удалён). Обновите список.", show_alert=True)
+        return
     nick = row.get("nickname", "Игрок")
 
     await state.update_data(del_user_id=user_id, del_user_nick=nick)
@@ -1537,6 +1646,111 @@ async def notify_partner_requests():
         logging.exception("❌ Ошибка уведомления о заявках на совладельца")
 
 
+@dp.message(Command("claim"))
+async def start_tent_claim(message: types.Message, state: FSMContext):
+    await state.clear()
+    await state.set_state(TentClaimState.waiting_for_tent)
+    await message.answer("Укажите номер занятой палатки, к которой хотите получить доступ (1–20):")
+
+
+@dp.message(TentClaimState.waiting_for_tent)
+async def claim_tent_number(message: types.Message, state: FSMContext):
+    try:
+        tent_num = int(message.text.strip())
+    except (TypeError, ValueError):
+        await message.answer("Введите номер палатки от 1 до 20.")
+        return
+    if not 1 <= tent_num <= 20:
+        await message.answer("Введите номер палатки от 1 до 20.")
+        return
+    tent = await firestore_sync.get_tent_data(tent_num)
+    if not tent or not tent.get("occupied"):
+        await message.answer("Эта палатка свободна или не найдена. Проверьте номер.")
+        return
+    if tent.get("tgId") and int(tent["tgId"]) == message.from_user.id:
+        await state.clear()
+        await message.answer("Эта палатка уже привязана к вашему Telegram.")
+        return
+    await state.update_data(tent_num=tent_num)
+    await state.set_state(TentClaimState.waiting_for_nickname)
+    await message.answer(f"Введите ваш точный Minecraft-ник для палатки №{tent_num}:")
+
+
+@dp.message(TentClaimState.waiting_for_nickname)
+async def submit_tent_claim(message: types.Message, state: FSMContext):
+    nickname = (message.text or "").strip()
+    data = await state.get_data()
+    tent_num = data.get("tent_num")
+    if not nickname or len(nickname) > 32 or not re.fullmatch(r"[A-Za-z0-9_А-Яа-я-]+", nickname):
+        await message.answer("Введите Minecraft-ник: до 32 символов, без пробелов.")
+        return
+    existing = await firestore_sync.get_user_tent(message.from_user.id)
+    if existing:
+        await state.clear()
+        await message.answer(f"У вас уже есть привязанная палатка №{existing[0]}.")
+        return
+    request_id = await firestore_sync.create_tent_claim({
+        "tentNum": tent_num,
+        "requesterTgId": message.from_user.id,
+        "requesterUsername": message.from_user.username or "",
+        "minecraftNick": nickname,
+    })
+    await state.clear()
+    await message.answer("Заявка отправлена администрации. Доступ появится после проверки.")
+    await notify_admins(
+        f"🔗 <b>Заявка на привязку палатки №{tent_num}</b>\n"
+        f"Telegram: @{message.from_user.username or 'без username'} ({message.from_user.id})\n"
+        f"Minecraft: {nickname}",
+    )
+
+
+@dp.callback_query(F.data.startswith("claim_"))
+async def resolve_tent_claim_callback(callback: types.CallbackQuery):
+    if not can_manage_tents(callback.from_user.id):
+        await callback.answer("❌ Нет прав.", show_alert=True)
+        return
+    parts = callback.data.split("_", 2)
+    request_id = parts[2]
+    approve = parts[1] == "ok"
+    try:
+        request = await firestore_sync.resolve_tent_claim(request_id, approve, callback.from_user.id)
+        if approve:
+            text = "✅ Заявка одобрена, палатка привязана к Telegram."
+            await safe_send(int(request.get("requesterTgId")), f"✅ Палатка №{request.get('tentNum')} привязана к вашему Telegram.")
+        else:
+            text = "❌ Заявка отклонена."
+            await safe_send(int(request.get("requesterTgId")), f"❌ Заявка на привязку палатки №{request.get('tentNum')} отклонена.")
+        await callback.message.edit_text((callback.message.text or "") + f"\n\n{text}")
+        await callback.answer(text)
+    except ValueError as error:
+        await callback.answer(str(error), show_alert=True)
+
+
+async def notify_tent_claims():
+    try:
+        for request in await firestore_sync.get_pending_tent_claims():
+            if request.get("adminNotifiedAt"):
+                continue
+            keyboard = InlineKeyboardBuilder()
+            keyboard.button(text="✅ Привязать", callback_data=f"claim_ok_{request['id']}")
+            keyboard.button(text="❌ Отклонить", callback_data=f"claim_no_{request['id']}")
+            keyboard.adjust(2)
+            text = (f"🔗 <b>ПРОВЕРКА ВЛАДЕЛЬЦА ПАЛАТКИ №{request.get('tentNum')}</b>\n\n"
+                    f"Telegram: @{request.get('requesterUsername') or 'без username'} ({request.get('requesterTgId')})\n"
+                    f"Minecraft: {request.get('minecraftNick')}")
+            delivered = False
+            for admin_id in get_admin_recipients():
+                try:
+                    await bot.send_message(admin_id, text, reply_markup=keyboard.as_markup(), parse_mode="HTML")
+                    delivered = True
+                except Exception:
+                    logging.exception("Ошибка отправки заявки на привязку админу")
+            if delivered:
+                await firestore_sync.upsert_bot_document("tent_claim_requests", request["id"], {"adminNotifiedAt": int(time.time() * 1000)})
+    except Exception:
+        logging.exception("❌ Ошибка уведомления о заявках на привязку")
+
+
 async def get_current_tariffs() -> dict:
     """Тарифы теперь редактируются администратором прямо в Mini App (коллекция
     Firestore 'tariffs'). Если админ-панель ещё не наполнялась (пустая коллекция),
@@ -1548,8 +1762,11 @@ async def get_current_tariffs() -> dict:
 async def notify_web_rental_requests():
     """Sends Mini App rental requests to admins; the user never needs the bot chat."""
     try:
+        pending = await firestore_sync.get_pending_rental_requests()
+        if not pending:
+            return
         current_tariffs = await get_current_tariffs()
-        for request in await firestore_sync.get_pending_rental_requests():
+        for request in pending:
             if request.get("adminNotifiedAt"):
                 continue
             tariff = current_tariffs.get(request.get("tariffCode"), {})
@@ -1717,6 +1934,36 @@ async def reject_web_rental(callback: types.CallbackQuery):
 
 
 # === 🚀 ЗАПУСК БОТА И ПЛАНИРОВЩИКА ===
+async def sync_all_tents_to_sheets():
+    """Периодически «выравнивает» Google-таблицу по текущему состоянию Firestore.
+
+    Раньше строка в Sheets обновлялась только когда бот САМ изменял палатку
+    (выдал/снял/продлил). Но палатки теперь редактируются ещё из двух мест —
+    Mini App и десктопная программа-менеджер (tz_manager.html) — оба пишут
+    напрямую в Firestore, минуя бота. Эта задача читает все 20 палаток из
+    единой базы (Firestore) и обновляет реестр, так что таблица всегда
+    отражает реальное состояние независимо от того, кто внёс изменение.
+
+    ВАЖНО: коллекция bot_payments читается ОДИН раз за весь проход (а не 20 раз —
+    по одному на каждую палатку), иначе это моментально выжигает бесплатную
+    дневную квоту чтений Firestore."""
+    if not sheets_sync.is_configured():
+        return
+    try:
+        all_payments = await firestore_sync.list_bot_documents("rental_history")
+        payments_by_tent = {}
+        for item in all_payments:
+            payments_by_tent.setdefault(int(item.get("tentNum", 0)), []).append({
+                "price": item.get("amount", 0),
+                "operationAt": item.get("operationAt", 0),
+            })
+        for tid in range(1, 21):
+            await sync_tent_row(tid, payments_by_tent=payments_by_tent)
+            await asyncio.sleep(1.1)  # не упереться в лимит Google Sheets API
+    except Exception as e:
+        logging.error(f"❌ Ошибка периодической синхронизации палаток с Google Sheets: {e}")
+
+
 async def main():
     if MINIAPP_URL:
         try:
@@ -1729,10 +1976,13 @@ async def main():
     scheduler = AsyncIOScheduler(timezone=MSK_TZ)
     scheduler.add_job(check_tent_expirations, 'cron', hour=12, minute=0)
     scheduler.add_job(products_sync.sync_products, 'interval', minutes=products_sync.sync_interval_minutes(), next_run_time=datetime.now())
-    scheduler.add_job(notify_partner_requests, 'interval', minutes=1, next_run_time=datetime.now())
-    scheduler.add_job(notify_web_rental_requests, 'interval', minutes=1, next_run_time=datetime.now())
-    scheduler.add_job(notify_chat_messages, 'interval', seconds=20, next_run_time=datetime.now())
-    scheduler.add_job(notify_license_requests, 'interval', minutes=1, next_run_time=datetime.now())
+    scheduler.add_job(notify_partner_requests, 'interval', minutes=2, next_run_time=datetime.now())
+    scheduler.add_job(notify_web_rental_requests, 'interval', minutes=2, next_run_time=datetime.now())
+    scheduler.add_job(notify_tent_claims, 'interval', minutes=2, next_run_time=datetime.now())
+    scheduler.add_job(notify_chat_messages, 'interval', seconds=45, next_run_time=datetime.now())
+    scheduler.add_job(notify_license_requests, 'interval', minutes=2, next_run_time=datetime.now())
+    scheduler.add_job(sync_all_tents_to_sheets, 'interval', minutes=20)
+    scheduler.add_job(send_db_backup, 'interval', days=3)
     scheduler.start()
 
     # Одноразовая безопасная миграция: досоздаёт в Firestore только те палатки, которых
@@ -1756,8 +2006,7 @@ async def main():
 
     if sheets_sync.is_configured():
         try:
-            for tid in range(1, 21):
-                await sync_tent_row(tid)
+            await sync_all_tents_to_sheets()
         except Exception as e:
             logging.error(f"❌ Не удалось выполнить стартовую синхронизацию с Google Sheets: {e}")
 
